@@ -96,6 +96,25 @@ function accrualFrac(start, end, conv) {
   }
   return days / 365; // ACT/365
 }
+function interpCurve(curve, t) {
+  if (!curve || !curve.length) return null;
+  if (t <= curve[0].t) return curve[0].r;
+  if (t >= curve[curve.length - 1].t) return curve[curve.length - 1].r;
+  for (let i = 1; i < curve.length; i++) {
+    if (t <= curve[i].t) {
+      const a = curve[i - 1], b = curve[i];
+      return a.r + ((b.r - a.r) * (t - a.t)) / (b.t - a.t);
+    }
+  }
+  return curve[curve.length - 1].r;
+}
+// Malz smile: sigma(delta) = ATM - 2 RR (d - 1/2) + 16 BF (d - 1/2)^2, delta = forward call delta at ATM vol
+function smileVol(atm, rr, bf, F, K, T) {
+  const sq = Math.max(atm * Math.sqrt(Math.max(T, 1e-9)), 1e-9);
+  const d1 = (Math.log(F / K) + 0.5 * atm * atm * T) / sq;
+  const x = normCdf(d1) - 0.5;
+  return Math.max(atm - 2 * rr * x + 16 * bf * x * x, 0.001);
+}
 function dcdMatDate(startISO, term) {
   const s = new Date(startISO + "T00:00:00");
   if (term === "1W") return new Date(s.getTime() + 7 * 86400000);
@@ -109,7 +128,8 @@ function priceEngine(params, z, u, nPaths, taus, collect) {
   const { S0, K, B, L, target, sigma, rd, rf, omega, amtEURperFix, koConv,
           lkoOn, H, lkoStyle, lkoVariant, ekiOn, E,
           pivotOn, kLow, kHigh, pivotL, pivotEkiOn, eLow, eHigh, payAtMat,
-          accOn, koLevel, accStyle, countOn, targetCount } = params;
+          accOn, koLevel, accStyle, countOn, targetCount,
+          capLossOn, targetS, koConvS } = params;
   const n = taus.length;
   const mu = rd - rf;
   const dt = new Float64Array(n), drift = new Float64Array(n),
@@ -125,9 +145,9 @@ function priceEngine(params, z, u, nPaths, taus, collect) {
   const accAmer = accOn && accStyle === "American";
   const dfn = Math.exp(-rd * taus[n - 1]); // single discount factor when everything pays at maturity (ZC)
   const stats = collect ? { alive: new Float64Array(n), cf: new Float64Array(n) } : null;
-  let sum = 0, sumSq = 0, koCount = 0, lifeSum = 0, lkoCount = 0, ekiCount = 0;
+  let sum = 0, sumSq = 0, koCount = 0, lifeSum = 0, lkoCount = 0, ekiCount = 0, lossKoCount = 0;
   for (let p = 0; p < nPaths; p++) {
-    let S = S0, Sp = S0, acc = 0, gains = 0, pv = 0, alive = true, life = n,
+    let S = S0, Sp = S0, acc = 0, lAcc = 0, gains = 0, pv = 0, alive = true, life = n,
         lkoHit = false, lkoCounted = false, ekiTouched = false;
     const base = p * n;
     for (let i = 0; i < n; i++) {
@@ -207,7 +227,17 @@ function priceEngine(params, z, u, nPaths, taus, collect) {
             if (knockedIn) { cash = amtEURperFix * L * intr; ekiTouched = true; }
           } else {
             const beyond = omega === 1 ? S < B : S > B;
-            cash = amtEURperFix * (beyond ? L : 1) * intr;
+            const lossCash = amtEURperFix * (beyond ? L : 1) * intr; // negative
+            if (capLossOn) {
+              const lossFig = (beyond ? L : 1) * (-intr); // positive, rate units
+              const newL = lAcc + lossFig;
+              if (newL >= targetS) {
+                let payL = lossCash;
+                if (koConvS === "capped") payL = -amtEURperFix * Math.max(targetS - lAcc, 0);
+                else if (koConvS === "none") payL = 0;
+                cash = payL; terminate = true; lossKoCount++;
+              } else { lAcc = newL; cash = lossCash; }
+            } else cash = lossCash;
           }
         }
       }
@@ -224,26 +254,34 @@ function priceEngine(params, z, u, nPaths, taus, collect) {
   const varP = Math.max(sumSq / nPaths - pv * pv, 0);
   return { pv, se: Math.sqrt(varP / nPaths), koProb: koCount / nPaths,
            lkoProb: lkoCount / nPaths, ekiProb: ekiCount / nPaths,
+           lossKoProb: lossKoCount / nPaths,
            expLifeFix: lifeSum / nPaths, stats };
 }
 /* ---------- formatting: NO minus sign anywhere ----------
    negatives are rendered accounting style: (1,234)              */
-const raw = (x, d) => Math.abs(x).toLocaleString("en-US",
-  { minimumFractionDigits: d, maximumFractionDigits: d });
+const raw = (x, d = 0) => {
+  const s = Math.abs(x).toFixed(d);
+  const [i, f] = s.split(".");
+  const gi = i.replace(/\B(?=(\d{3})+(?!\d))/g, "."); // dot separates thousands, millions, …
+  return f ? gi + "." + f : gi;
+};
 const fmt = (x, d = 0) =>
   x == null || !isFinite(x) ? "…" : x < 0 ? `(${raw(x, d)})` : raw(x, d);
 const fmtSigned = (x, d = 0) =>
   x == null || !isFinite(x) ? "…" : x < 0 ? `(${raw(x, d)})` : "+" + raw(x, d);
-const bigRaw = a =>
-  a >= 1e9 ? (a / 1e9).toFixed(2) + "B" :
-  a >= 1e6 ? (a / 1e6).toFixed(2) + "M" :
-  a >= 1e4 ? (a / 1e3).toFixed(1) + "k" :
-  a.toLocaleString("en-US", { maximumFractionDigits: a >= 100 ? 0 : 2 });
+const bigRaw = a => raw(a, a < 100 && a !== Math.round(a) ? 2 : 0);
 const fmtBig = x =>
   x == null || !isFinite(x) ? "…" : x < 0 ? `(${bigRaw(Math.abs(x))})` : bigRaw(Math.abs(x));
 const fmtBigSigned = x =>
   x == null || !isFinite(x) ? "…" : x < 0 ? `(${bigRaw(Math.abs(x))})` : "+" + bigRaw(Math.abs(x));
-const fmtRate = (x, d = 4) =>
+const PAIRS = {
+  "EUR/USD": { base: "EUR", quote: "USD", pip: 0.0001, dec: 4, vol: 8.0, spot0: 1.0850 },
+  "GBP/USD": { base: "GBP", quote: "USD", pip: 0.0001, dec: 4, vol: 9.0, spot0: 1.2700 },
+  "EUR/GBP": { base: "EUR", quote: "GBP", pip: 0.0001, dec: 4, vol: 7.0, spot0: 0.8550 },
+  "USD/JPY": { base: "USD", quote: "JPY", pip: 0.01, dec: 3, vol: 10.0, spot0: 147.50 },
+};
+let RATE_DEC = 4; // display precision for the active pair
+const fmtRate = (x, d = RATE_DEC) =>
   x == null || !isFinite(x) ? "…" : x < 0 ? `(${Math.abs(x).toFixed(d)})` : x.toFixed(d);
 const GLOBAL_CSS = `
 @import url('https://cdnjs.cloudflare.com/ajax/libs/inter-ui/3.19.3/inter.css');
@@ -273,14 +311,16 @@ const fmtDate = d => d ? `${String(d.getDate()).padStart(2,"0")} ${MONTHS[d.getM
 function PayoffDiagram({ res, C, mono, sans }) {
   if (!res) return null;
   const { K, B, L, omega, amtEURperFix: A, S0, lkoOn, H, ekiOn, E, accOn, koLevel,
-          countOn, targetCount } = res;
+          countOn, targetCount, capLossOn } = res;
+  const tS = capLossOn ? (res.targetSRate != null ? res.targetSRate : res.targetSFig / 100) : 0;
+  const capX = capLossOn ? K - omega * (tS / Math.max(L, 1)) : null;
   const t = accOn ? Math.abs(koLevel - K)
-    : countOn ? Math.max(Math.abs(S0 - K) * 1.8, 0.03 * K)
-    : res.targetFig / 100;
+    : countOn ? Math.max(Math.abs(S0 - K) * 1.8, 0.028 * K)
+    : (res.targetRate != null ? res.targetRate : res.targetFig / 100);
   const KO = K + omega * t;
   const W = 880, HH = 380, mL = 84, mR = 40, mT = 46, mB = 74;
   const iw = W - mL - mR, ih = HH - mT - mB;
-  const barrierS = lkoOn ? H : ekiOn ? E : null;
+  const barrierS = lkoOn ? H : ekiOn ? E : capLossOn ? capX : null;
   const lossEnd = barrierS != null ? barrierS : K - omega * 0.55 * t;
   const lossDrawEnd = barrierS != null ? barrierS - omega * 0.22 * t : lossEnd;
   let x0 = Math.min(lossDrawEnd, B, K, KO, S0) - 0.06 * t;
@@ -297,11 +337,13 @@ function PayoffDiagram({ res, C, mono, sans }) {
       return knockedIn ? A * L * intr : 0;
     }
     const beyond = omega === 1 ? s < B : s > B;
-    return A * (beyond ? L : 1) * intr;
+    const raw2 = A * (beyond ? L : 1) * intr;
+    if (capLossOn) return Math.max(raw2, -A * tS);
+    return raw2;
   };
   const cv = 1 / S0;
-  const lossFloorRef = lkoOn ? H : ekiOn ? lossDrawEnd : (omega === 1 ? x0 : x1);
-  const lossFloorVal = A * L * omega * (lossFloorRef - K);
+  const lossFloorRef = lkoOn ? H : ekiOn ? lossDrawEnd : capLossOn ? capX : (omega === 1 ? x0 : x1);
+  const lossFloorVal = capLossOn ? -A * tS : A * L * omega * (lossFloorRef - K);
   const yTop = A * t;
   const yBot = Math.min(lossFloorVal, 0);
   const yMax = yTop * 1.18, yMin = yBot * 1.12 - yTop * 0.05;
@@ -311,13 +353,13 @@ function PayoffDiagram({ res, C, mono, sans }) {
   const gainB = X(KO);
   const bx = X(B);
   const hasLevGap = Math.abs(B - K) > 1e-9;
-  const lossEdgeS = lkoOn ? H : ekiOn ? lossDrawEnd : (omega === 1 ? x0 : x1);
+  const lossEdgeS = lkoOn ? H : ekiOn ? lossDrawEnd : capLossOn ? capX : (omega === 1 ? x0 : x1);
   const dir = omega === 1 ? "Buyer (Long)" : "Seller (Short)";
   const tagW = 26;
   const midGain = (K + KO) / 2;
   const midLoss = ekiOn ? (E + lossDrawEnd) / 2 : (B + lossEdgeS) / 2;
   const midPart = ekiOn ? (K + E) / 2 : null;
-  const title = countOn ? "Discrete TARF" : accOn ? "Accumulator"
+  const title = capLossOn ? "Cap Loss TARF" : countOn ? "Discrete TARF" : accOn ? "Accumulator"
     : lkoOn ? "Liability Knock Out TARF" : ekiOn ? "EKI TARF" : "Vanilla TARF";
   return (
     <svg viewBox={`0 0 ${W} ${HH}`} style={{ width: "100%", height: "auto", display: "block" }}>
@@ -325,7 +367,7 @@ function PayoffDiagram({ res, C, mono, sans }) {
         {title}
       </text>
       <text x={W / 2} y={38} textAnchor="middle" fontFamily={sans} fontSize="12.5" fill={C.mute}>
-        EURUSD {dir} · {fmtBig(A)} EUR per fixing
+        {res.pair} {dir} · {fmtBig(A)} {res.base} per fixing
       </text>
       <line x1={mL} y1={Y0} x2={W - mR + 6} y2={Y0} stroke={C.mute} strokeWidth="1.2" />
       <polygon points={`${W - mR + 6},${Y0} ${W - mR - 2},${Y0 - 4} ${W - mR - 2},${Y0 + 4}`} fill={C.mute} />
@@ -371,6 +413,14 @@ function PayoffDiagram({ res, C, mono, sans }) {
         <line x1={X(H)} y1={Y0} x2={omega === 1 ? mL : W - mR} y2={Y0}
           stroke={C.green} strokeWidth="2.6" strokeDasharray="6 5" />
       </g>)}
+      {capLossOn && (<g>
+        <line x1={X(capX)} y1={Y(-A * tS)} x2={omega === 1 ? mL : W - mR} y2={Y(-A * tS)}
+          stroke={C.red} strokeWidth="2.6" strokeDasharray="6 5" />
+        <text x={omega === 1 ? mL + 8 : W - mR - 8} textAnchor={omega === 1 ? "start" : "end"}
+          y={Y(-A * tS) - 8} fontFamily={mono} fontSize="10.5" fill={C.red}>
+          loss capped at ({fmtBig(A * tS * cv)}) {res.base}
+        </text>
+      </g>)}
       <line x1={X(K)} y1={Y0} x2={gainB} y2={Y(yTop)} stroke={C.green} strokeWidth="3.4" strokeLinecap="round" />
       {!countOn && (<g>
         <line x1={gainB} y1={Y(yTop)} x2={gainB} y2={Y0} stroke={C.red} strokeWidth="2.6" strokeDasharray="6 5" />
@@ -394,6 +444,14 @@ function PayoffDiagram({ res, C, mono, sans }) {
         <text x={gainB} y={Y0 + 76} textAnchor="middle" fontFamily={mono} fontSize="10.5" fill={C.text}>{fmtRate(KO)}</text>
       </g>
       )}
+      {capLossOn && (<g>
+        <line x1={X(capX)} y1={Y0} x2={X(capX)} y2={Y0 + 26} stroke={C.red} strokeDasharray="3 3" strokeWidth="1" />
+        <path d={`M ${X(capX) - 17} ${Y0 + 30} h34 v18 h-34 z M ${X(capX) - 17} ${Y0 + 30} L ${X(capX)} ${Y0 + 18} L ${X(capX) + 17} ${Y0 + 30} z`}
+          fill={C.red} />
+        <text x={X(capX)} y={Y0 + 43} textAnchor="middle" fontFamily={mono} fontSize="10.5" fontWeight="700" fill="#FFFFFF">CAP</text>
+        <text x={X(capX)} y={Y0 + 62} textAnchor="middle" fontFamily={sans} fontSize="9.5" fontWeight="700" fill={C.red}>Loss</text>
+        <text x={X(capX)} y={Y0 + 76} textAnchor="middle" fontFamily={mono} fontSize="10.5" fill={C.text}>{fmtRate(capX)}</text>
+      </g>)}
       {lkoOn && (<g>
         <path d={`M ${X(H) - 19} ${Y0 + 30} h38 v18 h-38 z M ${X(H) - 19} ${Y0 + 30} L ${X(H)} ${Y0 + 18} L ${X(H) + 19} ${Y0 + 30} z`}
           fill="#6D5FC7" />
@@ -440,7 +498,7 @@ function PayoffDiagram({ res, C, mono, sans }) {
         textAnchor={gainB > W - mR - 170 ? "end" : "start"}
         y={Y(yTop) - 10} fontFamily={mono} fontSize="10.5" fill={C.green}>
         {countOn ? "stops after gain #" + targetCount
-          : accOn ? "cancelled at KO" : "max +" + fmtBig(yTop * cv) + " EUR at KO"}
+          : accOn ? "cancelled at KO" : "max +" + fmtBig(yTop * cv) + " " + res.base + " at KO"}
       </text>
     </svg>
   );
@@ -476,11 +534,11 @@ function VanillaDiagram({ res, C, mono, sans }) {
   return (
     <svg viewBox={`0 0 ${W} ${HH}`} style={{ width: "100%", height: "auto", display: "block" }}>
       <text x={W / 2} y={20} textAnchor="middle" fontFamily={sans} fontSize="15" fontWeight="700" fill={C.text}>
-        {side} EURUSD {type}
+        {side} {res.pair} {type}
       </text>
       <text x={W / 2} y={38} textAnchor="middle" fontFamily={sans} fontSize="12.5" fill={C.mute}>
-        {type === "Call" ? "EUR call / USD put" : "EUR put / USD call"} · {fmtBig(eurN)} EUR notional ·
-        payoff at expiry net of premium, in EUR
+        {type === "Call" ? `${res.base} call / ${res.quote} put` : `${res.base} put / ${res.quote} call`} · {fmtBig(eurN)} {res.base} notional ·
+        payoff at expiry net of premium, in {res.base}
       </text>
       <line x1={mL} y1={Y0} x2={W - mR + 6} y2={Y0} stroke={C.mute} strokeWidth="1.2" />
       <polygon points={`${W - mR + 6},${Y0} ${W - mR - 2},${Y0 - 4} ${W - mR - 2},${Y0 + 4}`} fill={C.mute} />
@@ -490,7 +548,7 @@ function VanillaDiagram({ res, C, mono, sans }) {
       <text x={mL - 10} y={HH - mB} textAnchor="end" fontFamily={sans} fontSize="11" fill={C.mute}>(LOSS)</text>
       <text x={mL + iw / 2} y={HH - 16} textAnchor="middle" fontFamily={sans} fontSize="12"
         fontWeight="600" fill={C.mute}>
-        EURUSD at expiry
+        {res.pair} at expiry
       </text>
       {/* premium guide */}
       <line x1={mL} y1={Y(-sign * premEUR)} x2={W - mR} y2={Y(-sign * premEUR)}
@@ -531,8 +589,8 @@ function VanillaDiagram({ res, C, mono, sans }) {
 function DCDDiagram({ res, C, mono, sans }) {
   if (!res) return null;
   const { S0, K, depCcy, N, breakeven } = res;
-  const conv = depCcy === "EUR"; // conversion happens above K for a EUR deposit
-  const alt = depCcy === "EUR" ? "USD" : "EUR";
+  const conv = depCcy === res.base; // conversion happens above K for a base-ccy deposit
+  const alt = conv ? res.quote : res.base;
   const W = 880, HH = 380, mL = 100, mR = 40, mT = 46, mB = 74;
   const iw = W - mL - mR, ih = HH - mT - mB;
   const red = N; // nominal only, coupon excluded
@@ -575,7 +633,7 @@ function DCDDiagram({ res, C, mono, sans }) {
       </text>
       <text x={mL + iw / 2} y={HH - 16} textAnchor="middle" fontFamily={sans} fontSize="12"
         fontWeight="600" fill={C.mute}>
-        EURUSD at maturity
+        {res.pair} at maturity
       </text>
       {/* nominal guide */}
       <line x1={mL} y1={Y(red)} x2={W - mR} y2={Y(red)} stroke={C.line} strokeDasharray="3 4" />
@@ -667,7 +725,7 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
         {ekip ? "EKI Pivot TARF" : "Pivot TARF"}
       </text>
       <text x={W / 2} y={38} textAnchor="middle" fontFamily={sans} fontSize="12.5" fill={C.mute}>
-        EURUSD two sided · {fmtBig(A)} EUR per fixing · sells at {fmtRate(kH)} above pivot, buys at {fmtRate(kL)} below
+        {res.pair} two sided · {fmtBig(A)} {res.base} per fixing · sells at {fmtRate(kH)} above pivot, buys at {fmtRate(kL)} below
       </text>
       {/* axes */}
       <line x1={mL} y1={Y0} x2={W - mR + 6} y2={Y0} stroke={C.mute} strokeWidth="1.2" />
@@ -688,7 +746,7 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
       {capped && (<g>
         <line x1={mL} y1={capY} x2={W - mR} y2={capY} stroke={C.red} strokeDasharray="6 5" strokeWidth="1.6" />
         <text x={W - mR - 4} y={capY - 6} textAnchor="end" fontFamily={mono} fontSize="10.5" fill={C.red}>
-          KO Target · +{fmtBig(A * t * cv)} EUR ({fmt(res.targetFig, 0)} fig)
+          KO Target · +{fmtBig(A * t * cv)} {res.base} ({fmt(res.targetFig, 0)} fig)
         </text>
       </g>)}
       {!capped && (<g>
@@ -792,12 +850,178 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
   );
 }
 
+// ---------- design tokens & shared inputs (module scope so fields keep focus) ----------
+const C = {
+    bg: "radial-gradient(1000px 540px at 75% -10%, rgba(96,118,168,0.10), transparent 62%), #0A0C11",
+    card: "linear-gradient(180deg, #13161F 0%, #0F1218 100%)", card2: "#171B26", line: "#242A38",
+    inp: "#161A24", inpLine: "#2A3140",
+    text: "#E8EAEE", mute: "#98A1B3", faint: "#646E82",
+    blue: "#4A7DF0", amber: "#D9A441", green: "#2FBF8F", red: "#E5484D", violet: "#8B7EDB",
+  };
+const mono = "'SF Mono', ui-monospace, 'Cascadia Code', Consolas, 'Roboto Mono', Menlo, monospace";
+const sans = "'Inter', 'Inter UI', -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+const label = { fontSize: 12.5, color: C.mute, fontFamily: sans, marginBottom: 7, display: "block" };
+const colHead = { fontSize: 10.5, letterSpacing: "0.14em", textTransform: "uppercase",
+    color: C.faint, fontFamily: sans };
+const input = { width: "100%", boxSizing: "border-box", background: C.inp,
+    border: `1px solid ${C.inpLine}`, borderRadius: 10, color: C.text, padding: "11px 13px",
+    fontFamily: mono, fontSize: 14, outline: "none" };
+const card = { background: C.card, border: `1px solid ${C.line}`, borderRadius: 16, padding: 22,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03), 0 12px 36px rgba(0,0,0,0.38)" };
+const cardTitle = { fontFamily: sans, fontSize: 16.5, fontWeight: 700, color: C.text,
+    marginBottom: 16, letterSpacing: "-0.01em" };
+
+const Num = ({ v, set, step = "any", min }) => {
+  const [txt, setTxt] = useState(null);
+  return (
+    <input type="number" className="sp-input" step={step} min={min} style={input}
+      value={txt !== null ? txt : (v === "" || v == null ? "" : v)}
+      onFocus={() => setTxt(v === "" || v == null ? "" : String(v))}
+      onChange={e => {
+        const t = e.target.value;
+        setTxt(t);
+        const n = parseFloat(t);
+        set(t === "" ? "" : (isFinite(n) ? n : v));
+      }}
+      onBlur={() => setTxt(null)} />
+  );
+};
+const Sel = ({ v, set, opts }) => (
+    <div style={{ position: "relative" }}>
+      <select value={v} className="sp-input"
+        style={{ ...input, appearance: "none", WebkitAppearance: "none", MozAppearance: "none",
+          paddingRight: 30, cursor: "pointer" }}
+        onChange={e => set(e.target.value)}>
+        {opts.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+      <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-56%)",
+        pointerEvents: "none", color: C.mute, fontSize: 11 }}>▼</span>
+    </div>
+  );
+const NotionalInput = ({ v, set }) => (
+    <input type="text" inputMode="numeric" className="sp-input"
+      value={v === "" ? "" : fmt(v, 0)}
+      style={{ ...input, fontSize: 15, letterSpacing: "0.02em" }}
+      onChange={e => {
+        const raw2 = e.target.value.replace(/[^0-9]/g, "");
+        set(raw2 === "" ? "" : +raw2);
+      }} />
+  );
+// rate input: always displays 4 decimals when not being edited
+const RateNum = ({ v, set }) => {
+  const [txt, setTxt] = useState(null);
+  return (
+    <input type="number" className="sp-input" step={(1 / 10 ** RATE_DEC).toFixed(RATE_DEC)} inputMode="decimal"
+      value={txt !== null ? txt : (v === "" || !isFinite(+v) ? "" : (+v).toFixed(RATE_DEC))}
+      style={input}
+      onFocus={() => setTxt(v === "" || !isFinite(+v) ? "" : String(+v))}
+      onChange={e => {
+        setTxt(e.target.value);
+        const n = parseFloat(e.target.value);
+        set(e.target.value === "" ? "" : (isFinite(n) ? n : v));
+      }}
+      onBlur={() => setTxt(null)} />
+  );
+};
+const Field = ({ name, children, hint }) => (
+    <div>
+      <span style={label}>{name}</span>
+      {children}
+      {hint && <div style={{ fontSize: 11, color: C.faint, marginTop: 5, fontFamily: mono }}>{hint}</div>}
+    </div>
+  );
+
+
+// ---------- Ratex brand: glyph, nav pill, site header ----------
+const Glyph = ({ size = 30 }) => (
+  <div style={{ width: size, height: size, borderRadius: size * 0.3, transform: "rotate(45deg)",
+    background: "linear-gradient(135deg, #4A7DF0, #6E8EF7)",
+    boxShadow: "0 4px 16px rgba(74,125,240,0.45)", flexShrink: 0,
+    display: "flex", alignItems: "center", justifyContent: "center" }}>
+    <div style={{ width: size * 0.33, height: size * 0.33, borderRadius: size * 0.1,
+      background: "rgba(255,255,255,0.9)" }} />
+  </div>
+);
+const Wordmark = ({ size = 21 }) => (
+  <span style={{ fontSize: size, fontWeight: 800, letterSpacing: "-0.02em", color: C.text, fontFamily: sans }}>
+    Ra<span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #6E8EF7)",
+      WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>tex</span>
+  </span>
+);
+const NavPill = ({ active, onNav }) => (
+  <div style={{ display: "flex", gap: 4, background: "rgba(23,27,38,0.85)",
+    border: `1px solid ${C.line}`, borderRadius: 999, padding: 5 }}>
+    {[["home", "Home"], ["fx", "FX"], ["rates", "Rates"]].map(([id, lab]) => {
+      const on = active === id;
+      return (
+        <div key={id} onClick={() => onNav(id)} className="sp-btn"
+          style={{ padding: "7px 22px", borderRadius: 999, cursor: "pointer",
+            fontSize: 13.5, fontWeight: 600, fontFamily: sans, userSelect: "none",
+            color: on ? "#fff" : C.mute,
+            background: on ? "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)" : "transparent",
+            boxShadow: on ? "0 4px 14px rgba(74,125,240,0.35)" : "none" }}>
+          {lab}
+        </div>
+      );
+    })}
+  </div>
+);
+const SiteHeader = ({ active, onNav }) => (
+  <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 26,
+    paddingBottom: 16, borderBottom: `1px solid ${C.line}` }}>
+    <div onClick={() => onNav("home")}
+      style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+      <Glyph />
+      <Wordmark />
+    </div>
+    <span style={{ fontSize: 11.5, color: C.faint, letterSpacing: "0.06em", marginTop: 3 }}>
+      FX & Rates Structured Products
+    </span>
+    <div style={{ marginLeft: "auto" }}><NavPill active={active} onNav={onNav} /></div>
+  </div>
+);
+
+// ---------- desk-style form primitives ----------
+const Row = ({ name, children, caption }) => (
+  <div style={{ display: "grid", gridTemplateColumns: "148px 1fr", gap: 14,
+    alignItems: "start", marginBottom: 12 }}>
+    <div style={{ fontSize: 12.5, color: C.mute, fontFamily: sans, paddingTop: 12 }}>{name}</div>
+    <div>
+      {children}
+      {caption && <div style={{ fontSize: 11, color: C.faint, marginTop: 4, fontFamily: mono }}>{caption}</div>}
+    </div>
+  </div>
+);
+const PanelTitle = ({ children, right }) => (
+  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+    marginBottom: 18, paddingBottom: 10, borderBottom: `1px solid ${C.line}` }}>
+    <div style={{ fontSize: 11.5, letterSpacing: "0.18em", textTransform: "uppercase",
+      color: C.mute, fontWeight: 700, fontFamily: sans }}>{children}</div>
+    {right}
+  </div>
+);
+const PRODUCT_OPTS = [
+  ["TARF · Vanilla", "TARF", "vanilla"],
+  ["TARF · Liability Knock Out", "TARF", "lko"],
+  ["TARF · EKI", "TARF", "eki"],
+  ["TARF · Pivot", "TARF", "pivot"],
+  ["TARF · EKI Pivot", "TARF", "ekipivot"],
+  ["TARF · Discrete", "TARF", "count"],
+  ["Accumulator", "ACCU", "vanilla"],
+  ["Dual Currency Deposit", "DCD", "vanilla"],
+  ["Vanilla Option", "VAN", "vanilla"],
+];
+
 /* ———————————————— main app ———————————————— */
 export default function StructuredPricer() {
-  const [page, setPage] = useState("setup");
+  const [page, setPage] = useState("home"); // 'home' | 'setup' | 'results' | 'rates'
   const [product, setProduct] = useState("TARF");
   const [tarfType, setTarfType] = useState("vanilla"); // 'vanilla' | 'lko'
 
+  const [pair, setPairState] = useState("EUR/USD");
+  const PC = PAIRS[pair];
+  RATE_DEC = PC.dec;
+  const BASE = PC.base, QUOTE = PC.quote;
   const [spot, setSpot] = useState(1.0850);
   const [buyCcy, setBuyCcy] = useState("EUR");
   const [notional, setNotional] = useState(12000000);
@@ -808,6 +1032,8 @@ export default function StructuredPricer() {
   const [leverage, setLeverage] = useState(2);
   const [civ, setCiv] = useState(0.30);
   const [countTarget, setCountTarget] = useState(5);
+  const [civLoss, setCivLoss] = useState(0.60);
+  const [koConvS, setKoConvS] = useState("capped");
   const [koConv, setKoConv] = useState("full");
   const [payTiming, setPayTiming] = useState("Rolling");
   const [accKO, setAccKO] = useState(1.1200);
@@ -837,6 +1063,11 @@ export default function StructuredPricer() {
   const [busy, setBusy] = useState(false);
   const [spotLive, setSpotLive] = useState(undefined); // undefined = fetching, null = failed, {rate,src} = live
   const appliedLive = useRef(false);
+  const [curves, setCurves] = useState({ loading: true, eur: null, usd: null, eurSrc: null, usdSrc: null });
+  const touchedEUR = useRef(false), touchedUSD = useRef(false);
+  const [volMode, setVolMode] = useState("Flat");
+  const [rr25, setRR25] = useState(-1.00);
+  const [bf25, setBF25] = useState(0.35);
   const [showCivHelp, setShowCivHelp] = useState(false);
   const [notionalMode, setNotionalMode] = useState("Total");
   const [depCcy, setDepCcy] = useState("EUR");
@@ -848,7 +1079,7 @@ export default function StructuredPricer() {
   const [err, setErr] = useState("");
   const [selGreek, setSelGreek] = useState(null);
 
-  const omega = buyCcy === "EUR" ? 1 : -1;
+  const omega = buyCcy === BASE ? 1 : -1;
   const effLevBar = levBarSameAsStrike ? strike : levBar;
   const { maturity } = buildSchedule(startDate, Math.max(1, nFix || 1), freq);
   const isLKO = product === "TARF" && tarfType === "lko";
@@ -856,17 +1087,55 @@ export default function StructuredPricer() {
   const isPivot = product === "TARF" && tarfType === "pivot";
   const isPivotEKI = product === "TARF" && tarfType === "ekipivot";
   const isCount = product === "TARF" && tarfType === "count";
+  const isCapLoss = product === "TARF" && tarfType === "caploss";
   const isPivotFam = isPivot || isPivotEKI;
   const tarfName = tarfType === "lko" ? "Liability Knock Out TARF"
     : tarfType === "eki" ? "EKI TARF"
     : tarfType === "pivot" ? "Pivot TARF"
     : tarfType === "ekipivot" ? "EKI Pivot TARF"
-    : tarfType === "count" ? "Discrete TARF" : "Vanilla TARF";
+    : tarfType === "count" ? "Discrete TARF"
+    : tarfType === "caploss" ? "Cap Loss TARF" : "Vanilla TARF";
+
+  const nav = id => {
+    if (id === "home") setPage("home");
+    else if (id === "fx") setPage("products");
+    else setPage("rates");
+  };
+
+  const anchorLevels = useCallback((s, cfg) => {
+    const F = cfg.pip / 0.0001; // offset scale vs a 4dp pair
+    const rnd = x => +x.toFixed(cfg.dec);
+    setSpot(rnd(s));
+    setStrike(rnd(s - 0.0250 * F));
+    setLevBar(rnd(s - 0.0250 * F));
+    setLkoBar(rnd(s - 0.0850 * F));
+    setEkiBar(rnd(s - 0.0650 * F));
+    setKLow(rnd(s - 0.0450 * F));
+    setPivotLvl(rnd(s));
+    setKHigh(rnd(s + 0.0450 * F));
+    setELowBar(rnd(s - 0.0750 * F));
+    setEHighBar(rnd(s + 0.0750 * F));
+    setAccKO(rnd(s + 0.0350 * F));
+    setDcdStrike(rnd(s));
+    setVanStrike(rnd(s));
+  }, []);
+
+  const changePair = np => {
+    const cfg = PAIRS[np];
+    setPairState(np);
+    setBuyCcy(cfg.base);
+    setNotionalCcy(cfg.base);
+    setDepCcy(cfg.base);
+    setSigma(cfg.vol);
+    touchedEUR.current = false; touchedUSD.current = false;
+    appliedLive.current = false;
+    anchorLevels(cfg.spot0, cfg); // instant sensible levels; live fetch refines
+  };
 
   const fetchSpot = useCallback(async (applyLevels) => {
     const sources = [
-      ["https://api.frankfurter.app/latest?from=EUR&to=USD", d => d && d.rates && d.rates.USD, "ECB · frankfurter"],
-      ["https://open.er-api.com/v6/latest/EUR", d => d && d.rates && d.rates.USD, "open.er-api"],
+      [`https://api.frankfurter.app/latest?from=${BASE}&to=${QUOTE}`, d => d && d.rates && d.rates[QUOTE], "ECB · frankfurter"],
+      [`https://open.er-api.com/v6/latest/${BASE}`, d => d && d.rates && d.rates[QUOTE], "open.er-api"],
     ];
     for (const [url, pick, src] of sources) {
       try {
@@ -875,45 +1144,112 @@ export default function StructuredPricer() {
         const d = await r.json();
         const v = pick(d);
         if (v && isFinite(v)) {
-          const s = +(+v).toFixed(4); // EURUSD, 4 decimals
+          const s = +(+v).toFixed(PC.dec);
           setSpotLive({ rate: s, src });
           setSpot(s);
           if (applyLevels && !appliedLive.current) {
             appliedLive.current = true;
-            const rnd = x => +x.toFixed(4);
-            setStrike(rnd(s - 0.0250));
-            setLevBar(rnd(s - 0.0250));
-            setLkoBar(rnd(s - 0.0850));
-            setEkiBar(rnd(s - 0.0650));
-            setKLow(rnd(s - 0.0450));
-            setPivotLvl(s);
-            setKHigh(rnd(s + 0.0450));
-            setELowBar(rnd(s - 0.0750));
-            setEHighBar(rnd(s + 0.0750));
-            setAccKO(rnd(s + 0.0350));
-            setDcdStrike(s);
-            setVanStrike(s);
+            anchorLevels(s, PC);
           }
           return;
         }
       } catch (e) { /* try next source */ }
     }
     setSpotLive(null);
+  }, [pair, anchorLevels]);
+  useEffect(() => { setSpotLive(undefined); fetchSpot(true); }, [fetchSpot]);
+
+  const fetchCurves = useCallback(async () => {
+    // EUR: ECB euro area AAA government spot curve (CORS enabled, no key)
+    const eur = [];
+    const tenors = [["3M", 0.25], ["6M", 0.5], ["1Y", 1], ["2Y", 2], ["5Y", 5]];
+    await Promise.all(tenors.map(async ([lab, t]) => {
+      try {
+        const r = await fetch(
+          `https://data-api.ecb.europa.eu/service/data/YC/B.U2.EUR.4F.G_N_A.SV_C_YM.SR_${lab}?format=jsondata&lastNObservations=1`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const ser = d && d.dataSets && d.dataSets[0] && d.dataSets[0].series;
+        const k0 = ser && Object.keys(ser)[0];
+        const obs = k0 && ser[k0].observations;
+        const o0 = obs && obs[Object.keys(obs)[0]];
+        const v = o0 && o0[0];
+        if (v != null && isFinite(v)) eur.push({ t, r: +v });
+      } catch (e) { /* skip tenor */ }
+    }));
+    eur.sort((a, b) => a.t - b.t);
+    // USD: best-effort public attempt (US Treasury FiscalData); falls back to manual input
+    let usd = [];
+    try {
+      const r = await fetch(
+        "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/daily_treasury_yield_curve?sort=-record_date&page%5Bsize%5D=1");
+      if (r.ok) {
+        const d = await r.json();
+        const row = d && d.data && d.data[0];
+        if (row) {
+          const cand = {
+            0.25: ["bc_3month", "3_mo", "bc3month", "three_month"],
+            0.5: ["bc_6month", "6_mo", "six_month"],
+            1: ["bc_1year", "1_yr", "one_year"],
+            2: ["bc_2year", "2_yr", "two_year"],
+            5: ["bc_5year", "5_yr", "five_year"],
+          };
+          Object.entries(cand).forEach(([t, names]) => {
+            for (const nm of names) {
+              if (row[nm] != null && isFinite(+row[nm])) { usd.push({ t: +t, r: +row[nm] }); break; }
+            }
+          });
+          usd.sort((a, b) => a.t - b.t);
+        }
+      }
+    } catch (e) { /* fall back to manual */ }
+    setCurves({
+      loading: false,
+      eur: eur.length >= 2 ? eur : null, usd: usd.length >= 2 ? usd : null,
+      eurSrc: eur.length >= 2 ? "ECB AAA curve" : null,
+      usdSrc: usd.length >= 2 ? "US Treasury" : null,
+    });
   }, []);
-  useEffect(() => { fetchSpot(true); }, [fetchSpot]);
+  useEffect(() => { fetchCurves(); }, [fetchCurves]);
+
+  // maturity of the current trade in years, for curve interpolation
+  const matYears = (() => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    let d;
+    if (product === "DCD") d = dcdMatDate(startDate, dcdTerm);
+    else if (product === "VAN") d = dcdMatDate(startDate, vanTerm);
+    else d = maturity;
+    return d ? Math.max((d - today) / 86400000 / 365, 1 / 365) : 1;
+  })();
+
+  // auto-fill the rate fields from the curves at the trade maturity, until the user edits them
+  useEffect(() => {
+    const byCcy = ccy => ccy === "EUR" ? curves.eur : ccy === "USD" ? curves.usd : null;
+    const baseCurve = byCcy(BASE), quoteCurve = byCcy(QUOTE);
+    if (baseCurve && !touchedEUR.current) {
+      const r = interpCurve(baseCurve, matYears);
+      if (r != null && isFinite(r)) setREUR(+(+r).toFixed(2));
+    }
+    if (quoteCurve && !touchedUSD.current) {
+      const r = interpCurve(quoteCurve, matYears);
+      if (r != null && isFinite(r)) setRUSD(+(+r).toFixed(2));
+    }
+  }, [curves, matYears, BASE, QUOTE]);
 
   const runPricing = useCallback(() => {
     setBusy(true); setErr("");
     setTimeout(() => {
       try {
         if (product === "VAN") {
-          const S0v = +spot, Kv = +vanStrike, sig = +sigma / 100, rd = +rUSD / 100, rf = +rEUR / 100;
+          const S0v = +spot, Kv = +vanStrike, rd = +rUSD / 100, rf = +rEUR / 100;
           const Nv = +notional;
           if (!(S0v > 0 && Kv > 0 && Nv > 0)) throw new Error("Check spot, strike and notional.");
           const eDate = dcdMatDate(startDate, vanTerm);
           const today = new Date(); today.setHours(0, 0, 0, 0);
           const T = Math.max((eDate - today) / 86400000 / 365, 1 / 365);
-          const eurN = notionalCcy === "EUR" ? Nv : Nv / Kv;
+          const sig = volMode === "Flat" ? +sigma / 100
+            : smileVol(+sigma / 100, +rr25 / 100, +bf25 / 100, S0v * Math.exp((rd - rf) * T), Kv, T);
+          const eurN = notionalCcy === BASE ? Nv : Nv / Kv;
           const sign = vanSide === "Buy" ? 1 : -1;
           const cv0 = 1 / S0v;
           const posUSD = (s, sg = sig, rdd = rd, rff = rf, TT = T) => {
@@ -948,7 +1284,9 @@ export default function StructuredPricer() {
                                vEUR: (posUSD(s, sig, rd, rf + hR) - posUSD(s, sig, rd, rf - hR)) / (2 * hR) * 0.0001 * cv0 });
           }
           setRes({
-            kind: "VAN", name: vanSide + " EURUSD " + vanType,
+            kind: "VAN", name: vanSide + " " + pair + " " + vanType,
+            pair, base: BASE, quote: QUOTE,
+            sigUsed: sig * 100, volSmile: volMode !== "Flat",
             S0: S0v, K: Kv, side: vanSide, type: vanType, eurN, T,
             expiry: fmtDate(eDate), term: vanTerm,
             premEUR, premUSD, premPct: (premEUR / eurN) * 100, pips: pxPerEUR * 10000,
@@ -961,7 +1299,7 @@ export default function StructuredPricer() {
           return;
         }
         if (product === "DCD") {
-          const S0d = +spot, Kd = +dcdStrike, sig = +sigma / 100, rd = +rUSD / 100, rf = +rEUR / 100;
+          const S0d = +spot, Kd = +dcdStrike, rd = +rUSD / 100, rf = +rEUR / 100;
           const Nd = +notional;
           if (!(S0d > 0 && Kd > 0 && Nd > 0)) throw new Error("Check spot, conversion strike and notional.");
           const mDate = dcdMatDate(startDate, dcdTerm);
@@ -969,22 +1307,24 @@ export default function StructuredPricer() {
           const T = Math.max((mDate - today) / 86400000 / 365, 1 / 365); // option expiry, ACT/365
           const sDate = new Date(startDate + "T00:00:00");
           const tauAcc = accrualFrac(sDate, mDate, dcdDayCount);           // deposit accrual
+          const sig = volMode === "Flat" ? +sigma / 100
+            : smileVol(+sigma / 100, +rr25 / 100, +bf25 / 100, S0d * Math.exp((rd - rf) * T), Kd, T);
           const marg = (+dcdMargin || 0) / 100;
           const cv0 = 1 / S0d;
           // client's embedded short option, valued in USD
           const posUSD = (s, sg = sig, rdd = rd, rff = rf, TT = T) => {
             const g = gk(s, Kd, TT, rdd, rff, sg);
-            return depCcy === "EUR" ? -Nd * g.call : -(Nd / Kd) * g.put;
+            return depCcy === BASE ? -Nd * g.call : -(Nd / Kd) * g.put;
           };
           const g0 = gk(S0d, Kd, T, rd, rf, sig);
-          const premUSD = depCcy === "EUR" ? Nd * g0.call : (Nd / Kd) * g0.put;
-          const premDep = depCcy === "EUR" ? premUSD * cv0 : premUSD;
-          const rBase = depCcy === "EUR" ? rf : rd;
+          const premUSD = depCcy === BASE ? Nd * g0.call : (Nd / Kd) * g0.put;
+          const premDep = depCcy === BASE ? premUSD * cv0 : premUSD;
+          const rBase = depCcy === BASE ? rf : rd;
           const premNet = Math.max(premDep - Nd * marg * tauAcc, 0);
           const rEnh = rBase + premNet * Math.exp(rBase * T) / (Nd * tauAcc);
-          const prob = depCcy === "EUR" ? normCdf(g0.d2) : normCdf(-g0.d2);
+          const prob = depCcy === BASE ? normCdf(g0.d2) : normCdf(-g0.d2);
           const cpn = rEnh * tauAcc;
-          const breakeven = depCcy === "EUR" ? Kd * (1 + cpn) : Kd / (1 + cpn);
+          const breakeven = depCcy === BASE ? Kd * (1 + cpn) : Kd / (1 + cpn);
           const hS = S0d * 0.001, hV = 0.005, hR = 0.001;
           const b0 = posUSD(S0d);
           const delta = (posUSD(S0d + hS) - posUSD(S0d - hS)) / (2 * hS);
@@ -993,7 +1333,7 @@ export default function StructuredPricer() {
           const theta = posUSD(S0d, sig, rd, rf, Math.max(T - 1 / 365, 1e-6)) - b0;
           const rhoUSD = (posUSD(S0d, sig, rd + hR) - posUSD(S0d, sig, rd - hR)) / (2 * hR) * 0.0001;
           const rhoEUR = (posUSD(S0d, sig, rd, rf + hR) - posUSD(S0d, sig, rd, rf - hR)) / (2 * hR) * 0.0001;
-          const eurEquivN = depCcy === "EUR" ? Nd : Nd / Kd;
+          const eurEquivN = depCcy === BASE ? Nd : Nd / Kd;
           const NS = 25, sLo = S0d * 0.90, sHi = S0d * 1.10;
           const prof = { delta: [], gamma: [], vega: [], theta: [], rho: [], pv: [] };
           for (let i = 0; i < NS; i++) {
@@ -1008,12 +1348,14 @@ export default function StructuredPricer() {
           }
           setRes({
             kind: "DCD", name: "Dual Currency Deposit",
+            pair, base: BASE, quote: QUOTE,
+            sigUsed: sig * 100, volSmile: volMode !== "Flat",
             S0: S0d, K: Kd, depCcy, N: Nd, T, cpn, maturity: fmtDate(mDate), term: dcdTerm,
             dayCount: dcdDayCount,
             rEnh: rEnh * 100, rBase: rBase * 100, pickup: (rEnh - rBase) * 100,
             premDep, premPct: (premDep / Nd) * 100, prob: prob * 100, breakeven,
             fwd: S0d * Math.exp((rd - rf) * T),
-            optName: depCcy === "EUR" ? "short EUR call / USD put" : "short EUR put / USD call",
+            optName: depCcy === BASE ? `short ${BASE} call / ${QUOTE} put` : `short ${BASE} put / ${QUOTE} call`,
             delta, deltaPct: (delta / eurEquivN) * 100, gammaFig: gamma * 0.01,
             vega, theta, rhoUSD, rhoEUR,
             prof, pivotOn: false, lkoOn: false, ekiOn: false, pivotEkiOn: false,
@@ -1036,34 +1378,41 @@ export default function StructuredPricer() {
             if (!(EHB > KH)) throw new Error("High KI barrier must be above the High Strike.");
           }
         } else {
-          if (omega === 1 && B > K + 1e-12) throw new Error("Buying EUR: leverage barrier must be at or below the strike.");
-          if (omega === -1 && B < K - 1e-12) throw new Error("Buying USD: leverage barrier must be at or above the strike.");
+          if (omega === 1 && B > K + 1e-12) throw new Error("Buying " + BASE + ": leverage barrier must be at or below the strike.");
+          if (omega === -1 && B < K - 1e-12) throw new Error("Buying " + QUOTE + ": leverage barrier must be at or above the strike.");
         }
         const H = +lkoBar;
         const EB = +ekiBar;
         if (isEKI) {
-          if (omega === 1 && !(EB < K)) throw new Error("Buying EUR: KI barrier must be below the strike.");
-          if (omega === -1 && !(EB > K)) throw new Error("Buying USD: KI barrier must be above the strike.");
+          if (omega === 1 && !(EB < K)) throw new Error("Buying " + BASE + ": KI barrier must be below the strike.");
+          if (omega === -1 && !(EB > K)) throw new Error("Buying " + QUOTE + ": KI barrier must be above the strike.");
         }
         if (isLKO) {
-          if (omega === 1 && !(H < Math.min(K, B))) throw new Error("Buying EUR: LKO barrier must be below the strike and leverage barrier.");
-          if (omega === -1 && !(H > Math.max(K, B))) throw new Error("Buying USD: LKO barrier must be above the strike and leverage barrier.");
+          if (omega === 1 && !(H < Math.min(K, B))) throw new Error("Buying " + BASE + ": LKO barrier must be below the strike and leverage barrier.");
+          if (omega === -1 && !(H > Math.max(K, B))) throw new Error("Buying " + QUOTE + ": LKO barrier must be above the strike and leverage barrier.");
         }
         if (isACC) {
-          if (omega === 1 && !(KOL > K)) throw new Error("Buying EUR: KO barrier must be above the strike.");
-          if (omega === -1 && !(KOL < K)) throw new Error("Buying USD: KO barrier must be below the strike.");
+          if (omega === 1 && !(KOL > K)) throw new Error("Buying " + BASE + ": KO barrier must be above the strike.");
+          if (omega === -1 && !(KOL < K)) throw new Error("Buying " + QUOTE + ": KO barrier must be below the strike.");
         }
-        const target = (isACC || isCount) ? 1e18 : +civ * 1.0;
+        const figUnit = PC.pip * 10000; // rate units per 1.00 CIV (100 figures)
+        const target = (isACC || isCount) ? 1e18 : +civ * figUnit;
         if (!isACC && !isCount && !(target > 0)) throw new Error("CIV must be above 0.");
+        const targetS = +civLoss * figUnit;
+        if (isCapLoss && !(targetS > 0)) throw new Error("Loss cap CIV must be above 0.");
         const nGainTarget = Math.max(1, Math.round(+countTarget || 1));
         const n = Math.max(1, Math.min(60, Math.round(+nFix)));
         const { taus, maturity, dates } = buildSchedule(startDate, n, freq);
-        const sig = +sigma / 100, rd = +rUSD / 100, rf = +rEUR / 100;
+        const rd = +rUSD / 100, rf = +rEUR / 100;
+        const tauNs = taus[taus.length - 1];
+        const Kvol = isPivotFam ? PL : K;
+        const sig = volMode === "Flat" ? +sigma / 100
+          : smileVol(+sigma / 100, +rr25 / 100, +bf25 / 100, S0 * Math.exp((rd - rf) * tauNs), Kvol, tauNs);
         const convRate = isPivotFam ? PL : K;
         const totN = notionalMode === "Per fixing" ? (+notional) * n : +notional;
         const amtPerFixCcy = totN / n;
-        const amtEURperFix = notionalCcy === "EUR" ? amtPerFixCcy : amtPerFixCcy / convRate;
-        const totalEUR = notionalCcy === "EUR" ? totN : totN / convRate;
+        const amtEURperFix = notionalCcy === BASE ? amtPerFixCcy : amtPerFixCcy / convRate;
+        const totalEUR = notionalCcy === BASE ? totN : totN / convRate;
 
         const NP = Math.max(2000, Math.min(60000, Math.round(+nPaths)));
         const z = makeNormals(NP, n, 12345);
@@ -1074,7 +1423,8 @@ export default function StructuredPricer() {
           pivotOn: isPivotFam, kLow: KL, kHigh: KH, pivotL: PL,
           pivotEkiOn: isPivotEKI, eLow: ELB, eHigh: EHB, payAtMat,
           accOn: isACC, koLevel: KOL, accStyle: accKoStyle,
-          countOn: isCount, targetCount: nGainTarget };
+          countOn: isCount, targetCount: nGainTarget,
+          capLossOn: isCapLoss, targetS, koConvS };
         const P = (over, np = NP, tt = taus) => priceEngine({ ...base, ...over }, z, u, np, tt).pv;
         const r0 = priceEngine(base, z, u, NP, taus, true);
 
@@ -1133,7 +1483,11 @@ export default function StructuredPricer() {
         });
         setRes({
           fixings,
+          sigUsed: sig * 100, volSmile: volMode !== "Flat",
+          pair, base: BASE, quote: QUOTE,
+          targetRate: (isACC || isCount) ? null : target, targetSRate: targetS,
           name: isACC ? "Accumulator · " + accKoStyle + " KO"
+            : isCapLoss ? "Cap Loss TARF"
             : isCount ? "Discrete TARF"
             : isLKO ? "Liability Knock Out TARF" : isEKI ? "EKI TARF"
             : isPivotEKI ? "EKI Pivot TARF" : isPivot ? "Pivot TARF" : "Vanilla TARF",
@@ -1147,11 +1501,13 @@ export default function StructuredPricer() {
           amtEURperFix, targetFig: isACC ? Math.abs(KOL - K) * 100 : target * 100, S0, K, B, L, omega,
           accOn: isACC, koLevel: KOL, accStyle: accKoStyle,
           countOn: isCount, targetCount: nGainTarget,
+          capLossOn: isCapLoss, targetSFig: targetS * 100, koConvS,
+          lossKoProb: r0.lossKoProb * 100,
           lkoOn: isLKO, H, lkoStyle, lkoVariant, ekiOn: isEKI, E: EB,
           pivotOn: isPivotFam, kLow: KL, kHigh: KH, pivotL: PL,
           pivotEkiOn: isPivotEKI, eLow: ELB, eHigh: EHB, payAtMat,
           terms: {
-            pair: "EUR/USD", buyCcy, notional: totN, notionalCcy,
+            pair, buyCcy, notional: totN, notionalCcy,
             strike: K, leverage: L, civ: +civ, freq, nFix: n,
             sigma: +sigma, rUSD: +rUSD, rEUR: +rEUR, koConv,
             maturity: fmtDate(maturity),
@@ -1167,479 +1523,494 @@ export default function StructuredPricer() {
       isLKO, lkoBar, lkoStyle, lkoVariant, isEKI, ekiBar,
       isPivotFam, isPivotEKI, kLow, kHigh, pivotLvl, eLowBar, eHighBar, notionalMode,
       product, depCcy, dcdStrike, dcdTerm, dcdMargin, dcdDayCount, payTiming, accKO, accKoStyle,
-      vanType, vanSide, vanStrike, vanTerm, isCount, countTarget]);
-
-  // ---------- design tokens ----------
-  const C = {
-    bg: "radial-gradient(1000px 540px at 75% -10%, rgba(96,118,168,0.10), transparent 62%), #0A0C11",
-    card: "linear-gradient(180deg, #13161F 0%, #0F1218 100%)", card2: "#171B26", line: "#242A38",
-    inp: "#161A24", inpLine: "#2A3140",
-    text: "#E8EAEE", mute: "#98A1B3", faint: "#646E82",
-    blue: "#4A7DF0", amber: "#D9A441", green: "#2FBF8F", red: "#E5484D", violet: "#8B7EDB",
-  };
-  const mono = "'SF Mono', ui-monospace, 'Cascadia Code', Consolas, 'Roboto Mono', Menlo, monospace";
-  const sans = "'Inter', 'Inter UI', -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
-  const label = { fontSize: 12.5, color: C.mute, fontFamily: sans, marginBottom: 7, display: "block" };
-  const colHead = { fontSize: 10.5, letterSpacing: "0.14em", textTransform: "uppercase",
-    color: C.faint, fontFamily: sans };
-  const input = { width: "100%", boxSizing: "border-box", background: C.inp,
-    border: `1px solid ${C.inpLine}`, borderRadius: 10, color: C.text, padding: "11px 13px",
-    fontFamily: mono, fontSize: 14, outline: "none" };
-  const card = { background: C.card, border: `1px solid ${C.line}`, borderRadius: 16, padding: 22,
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03), 0 12px 36px rgba(0,0,0,0.38)" };
-  const cardTitle = { fontFamily: sans, fontSize: 16.5, fontWeight: 700, color: C.text,
-    marginBottom: 16, letterSpacing: "-0.01em" };
-
-  const Num = ({ v, set, step = "any", min }) => (
-    <input type="number" className="sp-input" value={v} step={step} min={min} style={input}
-      onChange={e => set(e.target.value === "" ? "" : +e.target.value)} />
-  );
-  const Sel = ({ v, set, opts }) => (
-    <div style={{ position: "relative" }}>
-      <select value={v} className="sp-input"
-        style={{ ...input, appearance: "none", WebkitAppearance: "none", MozAppearance: "none",
-          paddingRight: 30, cursor: "pointer" }}
-        onChange={e => set(e.target.value)}>
-        {opts.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
-      <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-56%)",
-        pointerEvents: "none", color: C.mute, fontSize: 11 }}>▼</span>
-    </div>
-  );
-  const NotionalInput = () => (
-    <input type="text" inputMode="numeric" className="sp-input"
-      value={notional === "" ? "" : fmt(notional, 0)}
-      style={{ ...input, fontSize: 15, letterSpacing: "0.02em" }}
-      onChange={e => {
-        const raw2 = e.target.value.replace(/[^0-9]/g, "");
-        setNotional(raw2 === "" ? "" : +raw2);
-      }} />
-  );
-  const Field = ({ name, children, hint }) => (
-    <div>
-      <span style={label}>{name}</span>
-      {children}
-      {hint && <div style={{ fontSize: 11, color: C.faint, marginTop: 5, fontFamily: mono }}>{hint}</div>}
-    </div>
-  );
+      vanType, vanSide, vanStrike, vanTerm, isCount, countTarget, volMode, rr25, bf25,
+      isCapLoss, civLoss, koConvS, pair, BASE, QUOTE, PC]);
 
   const products = [
     { id: "TARF", name: "TARF", desc: "Target redemption forward family: strip of leveraged forwards knocked out on accumulated gains", ready: true },
     { id: "ACCU", name: "Accumulator", desc: "Accumulative forward with a knock out barrier: European or American observation, rolling or ZC settlement", ready: true },
     { id: "DCD", name: "Dual Currency Deposit", desc: "Yield enhanced deposit: the client implicitly sells an FX option and earns its premium as extra coupon", ready: true },
-    { id: "VAN", name: "Vanilla Option", desc: "European EURUSD call or put, buy or sell, closed form Garman Kohlhagen", ready: true },
+    { id: "VAN", name: "Vanilla Option", desc: "European FX call or put, buy or sell, closed form Garman Kohlhagen", ready: true },
   ];
   const tarfTypes = [
     { id: "vanilla", name: "Vanilla TARF", desc: "Leverage applies on every losing fixing until maturity or target knock out" },
     { id: "lko", name: "Liability Knock Out TARF", desc: "A barrier on the loss side knocks the leverage down to 0x if triggered" },
     { id: "eki", name: "EKI TARF", desc: "European KI barrier: obligation only when the fixing lands beyond the barrier; in between, the client trades at market" },
-    { id: "pivot", name: "Pivot TARF", desc: "Two sided: sells EUR at the high strike above the pivot, buys EUR at the low strike below it, leveraged beyond the strikes" },
+    { id: "pivot", name: "Pivot TARF", desc: "Two sided: sells the base currency at the high strike above the pivot, buys it at the low strike below, leveraged beyond the strikes" },
     { id: "ekipivot", name: "EKI Pivot TARF", desc: "Pivot TARF with a pair of European KI barriers: leveraged obligations only knock in beyond them, participation in between" },
     { id: "count", name: "Discrete TARF", desc: "Knocks out after a fixed number of gaining fixings, regardless of their size, instead of an accumulated CIV amount" },
+    { id: "caploss", name: "Cap Loss TARF", desc: "Two targets: knocks out when accumulated gains reach the long target, or when accumulated leveraged losses reach the loss cap" },
   ];
 
-  const dirText = omega === 1 ? "Client buys EUR / sells USD at strike" : "Client buys USD / sells EUR at strike";
+  const dirText = omega === 1 ? `Client buys ${BASE} / sells ${QUOTE} at strike` : `Client buys ${QUOTE} / sells ${BASE} at strike`;
   const lossSide = omega === 1 ? "below" : "above";
 
-  /* ————————————————— PAGE 1 : SETUP ————————————————— */
-  if (page === "setup") {
+  /* ————————————————— HOME ————————————————— */
+  if (page === "home") {
     return (
       <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: sans, padding: "28px 24px 60px" }}>
         <style>{GLOBAL_CSS}</style>
         <div className="sp-fade" style={{ maxWidth: 1180, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 28,
-            paddingBottom: 18, borderBottom: `1px solid ${C.line}` }}>
-            <div style={{ width: 30, height: 30, borderRadius: 9, transform: "rotate(45deg)",
-              background: "linear-gradient(135deg, #4A7DF0, #6E8EF7)",
-              boxShadow: "0 4px 16px rgba(74,125,240,0.45)", flexShrink: 0,
-              display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <div style={{ width: 10, height: 10, borderRadius: 3, background: "rgba(255,255,255,0.9)" }} />
+          <SiteHeader active="home" onNav={nav} />
+          <div style={{ minHeight: "62vh", display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", textAlign: "center" }}>
+            <Glyph size={58} />
+            <div style={{ marginTop: 30 }}><Wordmark size={58} /></div>
+            <div style={{ marginTop: 18, fontSize: 19, color: C.mute, maxWidth: 620, lineHeight: 1.6 }}>
+              Price FX & Rates structured products: TARFs, accumulators, dual currency deposits
+              and options, with Monte Carlo Greeks, payoff diagrams and live market data.
             </div>
-            <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-0.02em" }}>
-              FX Structured Products{" "}
-              <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #8B7EDB)",
-                WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Pricer</span>
+            <div style={{ display: "flex", gap: 16, marginTop: 44, flexWrap: "wrap", justifyContent: "center" }}>
+              <button onClick={() => nav("fx")} className="sp-btn"
+                style={{ padding: "17px 44px", border: "none", borderRadius: 14, cursor: "pointer",
+                  background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)", color: "#fff",
+                  fontFamily: sans, fontSize: 16.5, fontWeight: 700,
+                  boxShadow: "0 10px 34px rgba(74,125,240,0.40)" }}>
+                FX Structured Products →
+              </button>
+              <button onClick={() => nav("rates")} className="sp-btn"
+                style={{ padding: "17px 44px", borderRadius: 14, cursor: "pointer",
+                  background: "transparent", border: `1.5px solid ${C.line}`, color: C.text,
+                  fontFamily: sans, fontSize: 16.5, fontWeight: 700 }}>
+                Rates Structured Products
+              </button>
             </div>
           </div>
+        </div>
+      </div>
+    );
+  }
 
-          {/* product family */}
+  /* ————————————————— RATES (placeholder) ————————————————— */
+  if (page === "rates") {
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: sans, padding: "28px 24px 60px" }}>
+        <style>{GLOBAL_CSS}</style>
+        <div className="sp-fade" style={{ maxWidth: 1180, margin: "0 auto" }}>
+          <SiteHeader active="rates" onNav={nav} />
+          <div style={{ ...card, maxWidth: 640, margin: "12vh auto 0", textAlign: "center", padding: 44 }}>
+            <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>
+              Rates <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #6E8EF7)",
+                WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Structured Products</span>
+            </div>
+            <div style={{ marginTop: 16, fontSize: 14.5, color: C.mute, lineHeight: 1.65 }}>
+              Coming soon: swaps and asset swap packages, caps & floors, swaptions,
+              CMS products and callable notes, priced on the same engine and design language
+              as the FX suite.
+            </div>
+            <button onClick={() => nav("fx")} className="sp-btn"
+              style={{ marginTop: 30, padding: "13px 34px", border: "none", borderRadius: 12,
+                cursor: "pointer", background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)",
+                color: "#fff", fontFamily: sans, fontSize: 14.5, fontWeight: 700,
+                boxShadow: "0 8px 26px rgba(74,125,240,0.35)" }}>
+              Go to FX Structured Products →
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ————————————————— FX PRODUCT CATALOG ————————————————— */
+  if (page === "products") {
+    const pick = (prod, tt) => {
+      setProduct(prod);
+      if (tt) setTarfType(tt);
+      setPage("setup");
+    };
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: sans, padding: "28px 24px 60px" }}>
+        <style>{GLOBAL_CSS}</style>
+        <div className="sp-fade" style={{ maxWidth: 1180, margin: "0 auto" }}>
+          <SiteHeader active="fx" onNav={nav} />
+          <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 6 }}>
+            FX Structured{" "}
+            <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #6E8EF7)",
+              WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Products</span>
+          </div>
+          <div style={{ fontSize: 13.5, color: C.mute, marginBottom: 26 }}>
+            Choose a product to open the pricing ticket.
+          </div>
+
+          {/* TARF family */}
           <div style={{ ...card, marginBottom: 20 }}>
-            <div style={cardTitle}>Product</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
-              {products.map(p => {
-                const active = product === p.id;
-                return (
-                  <div key={p.id} onClick={() => p.ready && setProduct(p.id)}
-                    className={p.ready ? "sp-click" : undefined}
-                    style={{ background: active ? "rgba(74,125,240,0.10)" : C.card2,
-                      border: `1.5px solid ${active ? C.blue : C.line}`, borderRadius: 12,
-                      padding: "16px 16px 14px", cursor: p.ready ? "pointer" : "not-allowed",
-                      opacity: p.ready ? 1 : 0.45, position: "relative" }}>
-                    <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6,
-                      color: active ? C.blue : C.text }}>{p.name}</div>
-                    <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.45 }}>{p.desc}</div>
-                    {!p.ready && (
-                      <div style={{ position: "absolute", top: 10, right: 10, fontSize: 9.5,
-                        letterSpacing: "0.1em", textTransform: "uppercase", color: C.faint,
-                        border: `1px solid ${C.line}`, borderRadius: 20, padding: "2px 8px" }}>soon</div>
-                    )}
-                    {active && (
-                      <div style={{ position: "absolute", top: 10, right: 10, width: 18, height: 18,
-                        borderRadius: 9, background: C.blue, color: "#fff", fontSize: 11,
-                        display: "flex", alignItems: "center", justifyContent: "center" }}>✓</div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* mandatory sub selection for TARF */}
-            {product === "TARF" && (
-              <div style={{ marginTop: 18, paddingTop: 18, borderTop: `1px solid ${C.line}` }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: C.mute, marginBottom: 12 }}>
-                  Which TARF? <span style={{ fontWeight: 400, color: C.faint }}>(required)</span>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }}>
-                  {tarfTypes.map(tt => {
-                    const active = tarfType === tt.id;
-                    return (
-                      <div key={tt.id} onClick={() => setTarfType(tt.id)} className="sp-click"
-                        style={{ display: "flex", gap: 12, alignItems: "flex-start",
-                          background: active ? "rgba(74,125,240,0.10)" : C.card2,
-                          border: `1.5px solid ${active ? C.blue : C.line}`, borderRadius: 12,
-                          padding: "14px 16px", cursor: "pointer" }}>
-                        <div style={{ width: 18, height: 18, borderRadius: 9, marginTop: 1, flexShrink: 0,
-                          border: `2px solid ${active ? C.blue : C.faint}`,
-                          background: active ? C.blue : "transparent",
-                          display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          {active && <div style={{ width: 6, height: 6, borderRadius: 3, background: "#fff" }} />}
-                        </div>
-                        <div>
-                          <div style={{ fontWeight: 700, fontSize: 14, color: active ? C.blue : C.text }}>{tt.name}</div>
-                          <div style={{ fontSize: 11.5, color: C.mute, marginTop: 4, lineHeight: 1.45 }}>{tt.desc}</div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 6 }}>
+              <div style={{ fontSize: 17, fontWeight: 700 }}>TARF</div>
+              <div style={{ fontSize: 12, color: C.faint }}>
+                target redemption forwards · strip of leveraged forwards knocked out on accumulated gains
               </div>
-            )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 14 }}>
+              {tarfTypes.map(tt => (
+                <div key={tt.id} onClick={() => pick("TARF", tt.id)} className="sp-click"
+                  style={{ background: C.card2, border: `1.5px solid ${C.line}`, borderRadius: 12,
+                    padding: "14px 16px", cursor: "pointer" }}>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{tt.name}</div>
+                  <div style={{ fontSize: 11.5, color: C.mute, marginTop: 5, lineHeight: 1.45 }}>{tt.desc}</div>
+                </div>
+              ))}
+            </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1.6fr", gap: 20, marginBottom: 20 }}>
-            <div style={card}>
-              <div style={cardTitle}>Market</div>
-              <div style={{ display: "grid", gap: 16 }}>
-                <Field name="Currency pair"><Sel v={"EUR/USD"} set={() => {}} opts={["EUR/USD"]} /></Field>
-                <div>
-                  <span style={{ ...label, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                    <span>Spot</span>
-                    <span onClick={() => fetchSpot(false)} title="Refresh live rate"
-                      style={{ cursor: "pointer", color: C.blue, fontSize: 12, lineHeight: 1,
-                        padding: "1px 6px", border: `1px solid ${C.line}`, borderRadius: 6 }}>↻</span>
-                  </span>
-                  <Num v={spot} set={setSpot} step="0.0001" />
-                  <div style={{ fontSize: 11, marginTop: 5, fontFamily: mono,
-                    color: spotLive && spotLive.rate ? C.green : C.faint }}>
-                    {spotLive === undefined ? "fetching live EURUSD…"
-                      : spotLive && spotLive.rate ? `live ${spotLive.rate.toFixed(4)} · ${spotLive.src}`
-                      : "live feed unavailable · manual"}
-                  </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  <Field name="USD rate (%)"><Num v={rUSD} set={setRUSD} step="0.05" /></Field>
-                  <Field name="EUR rate (%)"><Num v={rEUR} set={setREUR} step="0.05" /></Field>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  <Field name="Vol σ (%)"><Num v={sigma} set={setSigma} step="0.25" /></Field>
-                  <Field name="MC paths"><Num v={nPaths} set={setNPaths} step="1000" min="2000" /></Field>
+          {/* other products */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 20 }}>
+            {products.filter(pr => pr.id !== "TARF").map(pr => (
+              <div key={pr.id} onClick={() => pick(pr.id)} className="sp-click"
+                style={{ ...card, cursor: "pointer" }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>{pr.name}</div>
+                <div style={{ fontSize: 12, color: C.mute, marginTop: 8, lineHeight: 1.5 }}>{pr.desc}</div>
+                <div style={{ marginTop: 16, fontSize: 12.5, fontWeight: 700, color: C.blue }}>
+                  Open ticket →
                 </div>
               </div>
-            </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
+  /* ————————————————— PAGE 1 : SETUP (desk layout) ————————————————— */
+  if (page === "setup") {
+    const famName = products.find(pr => pr.id === product)?.name || product;
+    const tarfLabel = (tarfTypes.find(tt => tt.id === tarfType) || tarfTypes[0]).name;
+    const setTarfLabel = lab => {
+      const e = tarfTypes.find(tt => tt.name === lab);
+      if (e) setTarfType(e.id);
+    };
+    const isMC = product === "TARF" || product === "ACCU";
+    const isDirStrike = (product === "TARF" && !isPivotFam) || product === "ACCU";
+    const wayShown = isDirStrike; // pivot family is two sided, DCD/VAN have their own selectors
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: sans, padding: "28px 24px 60px" }}>
+        <style>{GLOBAL_CSS}</style>
+        <div className="sp-fade" style={{ maxWidth: 1180, margin: "0 auto" }}>
+          <SiteHeader active="fx" onNav={nav} />
+          <button onClick={() => setPage("products")} className="sp-btn"
+            style={{ background: C.card2, border: `1px solid ${C.line}`, color: C.text,
+              borderRadius: 10, padding: "8px 15px", fontSize: 13, cursor: "pointer",
+              fontFamily: sans, marginBottom: 18 }}>
+            ← All products
+          </button>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1.15fr 1fr", gap: 20, alignItems: "start" }}>
+
+            {/* ————— GLOBAL CHARACTERISTICS ————— */}
             <div style={card}>
-              <div style={cardTitle}>Trade · {product === "DCD" ? "Dual Currency Deposit"
-                : product === "ACCU" ? "Accumulator"
-                : product === "VAN" ? "Vanilla Option" : tarfName}</div>
-              {product === "VAN" ? (<>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                  <Field name="Type" hint={vanType === "Call" ? "EUR call / USD put" : "EUR put / USD call"}>
-                    <Sel v={vanType} set={setVanType} opts={["Call", "Put"]} /></Field>
-                  <Field name="Position">
-                    <Sel v={vanSide} set={setVanSide} opts={["Buy", "Sell"]} /></Field>
-                  <Field name="Strike">
-                    <Num v={vanStrike} set={setVanStrike} step="0.0001" /></Field>
-                  <div style={{ gridColumn: "1 / span 2" }}>
-                    <Field name="Notional"
-                      hint={notionalCcy === "USD" ? `= ${fmtBig((+notional || 0) / (+vanStrike || 1))} EUR at the strike` : "EUR notional of the option"}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 92px", gap: 10 }}>
-                        <NotionalInput />
-                        <Sel v={notionalCcy} set={setNotionalCcy} opts={["EUR", "USD"]} />
-                      </div>
-                    </Field>
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, color: C.faint, marginTop: 14, lineHeight: 1.55 }}>
-                  European exercise, cash settled at expiry, priced closed form under Garman Kohlhagen with the
-                  model rates and flat vol from the Market card. The client {vanSide === "Buy" ? "pays" : "receives"} the
-                  premium today.
-                </div>
-              </>) : product === "ACCU" ? (<>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                  <Field name="Client buys"><Sel v={buyCcy} set={setBuyCcy} opts={["EUR", "USD"]} /></Field>
-                  <Field name="Strike" hint={omega === 1 ? "below market, client accumulates here" : "above market"}>
-                    <Num v={strike} set={setStrike} step="0.0001" /></Field>
-                  <Field name="Leverage"><Num v={leverage} set={setLeverage} step="0.5" min="1" /></Field>
-                  <div style={{ gridColumn: "1 / span 2" }}>
-                    <Field name="Notional"
-                      hint={notionalMode === "Total"
-                        ? `= ${fmtBig((+notional || 0) / Math.max(1, Math.round(+nFix || 1)))} ${notionalCcy} per fixing`
-                        : `= ${fmtBig((+notional || 0) * Math.max(1, Math.round(+nFix || 1)))} ${notionalCcy} total`}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 148px 96px", gap: 10 }}>
-                        <NotionalInput />
-                        <Sel v={notionalMode} set={setNotionalMode} opts={["Total", "Per fixing"]} />
-                        <Sel v={notionalCcy} set={setNotionalCcy} opts={["EUR", "USD"]} />
-                      </div>
-                    </Field>
-                  </div>
-                  <Field name="KO barrier" hint={omega === 1 ? "above strike, cancels the trade" : "below strike, cancels the trade"}>
-                    <Num v={accKO} set={setAccKO} step="0.0001" /></Field>
-                  <Field name="KO observation">
-                    <Sel v={accKoStyle} set={setAccKoStyle} opts={["European", "American"]} /></Field>
-                  <Field name="Payment timing"
-                    hint={payTiming === "Rolling" ? "each fixing settles on its date" : "all flows accumulate and pay at maturity"}>
-                    <Sel v={payTiming} set={setPayTiming} opts={["Rolling", "At maturity (ZC)"]} /></Field>
-                </div>
-                <div style={{ fontSize: 12, color: C.faint, marginTop: 14, lineHeight: 1.55 }}>
-                  {omega === 1 ? "Client buys EUR / sells USD at the strike" : "Client buys USD / sells EUR at the strike"}{" "}
-                  on every fixing: 100% of the per fixing notional on favourable fixings, ×{leverage || "…"} on
-                  unfavourable ones. If the {accKoStyle === "European" ? "fixing" : "spot path"} crosses the KO
-                  barrier, that fixing and all remaining fixings are cancelled.
-                </div>
-              </>) : product === "DCD" ? (<>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                  <Field name="Deposit currency"><Sel v={depCcy} set={setDepCcy} opts={["EUR", "USD"]} /></Field>
-                  <Field name="Conversion strike"
-                    hint={depCcy === "EUR" ? "converted into USD if fixing above" : "converted into EUR if fixing below"}>
-                    <Num v={dcdStrike} set={setDcdStrike} step="0.0001" /></Field>
-                  <Field name="Bank margin (% p.a.)" hint="deducted from the coupon">
-                    <Num v={dcdMargin} set={setDcdMargin} step="0.05" min="0" /></Field>
-                  <div style={{ gridColumn: "1 / span 2" }}>
-                    <Field name={`Deposit notional (${depCcy})`} hint="placed for the full term">
-                      <NotionalInput />
-                    </Field>
-                  </div>
-                </div>
-                <div style={{ fontSize: 12, color: C.faint, marginTop: 14, lineHeight: 1.55 }}>
-                  The client places a {depCcy} deposit and implicitly sells the bank a{" "}
-                  {depCcy === "EUR" ? "EUR call / USD put" : "EUR put / USD call"} struck at the conversion
-                  strike; the premium is returned as an enhanced coupon. At maturity the bank repays the weaker
-                  currency: {depCcy} plus coupon if there is no conversion, otherwise the alternative currency
-                  converted at the strike.
-                </div>
-              </>) : (<>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                {!isPivotFam && (<>
-                  <Field name="Client buys"><Sel v={buyCcy} set={setBuyCcy} opts={["EUR", "USD"]} /></Field>
-                  <Field name="Strike"><Num v={strike} set={setStrike} step="0.0001" /></Field>
-                </>)}
-                {isPivotFam && (<>
-                  <Field name="Low Strike (Call)" hint="client buys EUR here below pivot">
-                    <Num v={kLow} set={setKLow} step="0.0001" /></Field>
-                  <Field name="Pivot level">
-                    <Num v={pivotLvl} set={setPivotLvl} step="0.0001" /></Field>
-                  <Field name="High Strike (Put)" hint="client sells EUR here above pivot">
-                    <Num v={kHigh} set={setKHigh} step="0.0001" /></Field>
-                </>)}
-                <Field name="Leverage"><Num v={leverage} set={setLeverage} step="0.5" min="1" /></Field>
-                <div style={{ gridColumn: "1 / span 2" }}>
-                  <Field name="Notional"
-                    hint={notionalMode === "Total"
-                      ? `= ${fmtBig((+notional || 0) / Math.max(1, Math.round(+nFix || 1)))} ${notionalCcy} per fixing`
-                      : `= ${fmtBig((+notional || 0) * Math.max(1, Math.round(+nFix || 1)))} ${notionalCcy} total`}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 148px 96px", gap: 10 }}>
-                      <NotionalInput />
-                      <Sel v={notionalMode} set={setNotionalMode} opts={["Total", "Per fixing"]} />
-                      <Sel v={notionalCcy} set={setNotionalCcy} opts={["EUR", "USD"]} />
-                    </div>
-                  </Field>
-                </div>
-                {isCount ? (
-                  <Field name="Target # of gains" hint="trade stops after this many ITM fixings">
-                    <Num v={countTarget} set={setCountTarget} step="1" min="1" />
-                  </Field>
+              <PanelTitle>Global Characteristics</PanelTitle>
+
+              <Row name="Product Type"
+                caption={product === "TARF" ? "switch between TARF variants here · other products via ← All products" : undefined}>
+                {product === "TARF" ? (
+                  <Sel v={tarfLabel} set={setTarfLabel} opts={tarfTypes.map(tt => tt.name)} />
                 ) : (
-                <div>
-                  <span style={label}>CIV target{" "}
+                  <div style={{ ...input, background: "transparent",
+                    border: `1px dashed ${C.inpLine}`, color: C.text, fontWeight: 600 }}>
+                    {famName}
+                  </div>
+                )}
+              </Row>
+              <Row name="Currency Pair">
+                <Sel v={pair} set={changePair} opts={Object.keys(PAIRS)} />
+              </Row>
+
+              {wayShown && (
+                <Row name="Customer Way"
+                  caption={omega === 1 ? `client buys ${BASE} / sells ${QUOTE} at the strike` : `client buys ${QUOTE} / sells ${BASE} at the strike`}>
+                  <Sel v={buyCcy === BASE ? "Buys " + BASE : "Buys " + QUOTE}
+                    set={v => setBuyCcy(v === "Buys " + BASE ? BASE : QUOTE)}
+                    opts={["Buys " + BASE, "Buys " + QUOTE]} />
+                </Row>
+              )}
+
+              {product === "VAN" && (<>
+                <Row name="Type" caption={vanType === "Call" ? `${BASE} call / ${QUOTE} put` : `${BASE} put / ${QUOTE} call`}>
+                  <Sel v={vanType} set={setVanType} opts={["Call", "Put"]} />
+                </Row>
+                <Row name="Position">
+                  <Sel v={vanSide} set={setVanSide} opts={["Buy", "Sell"]} />
+                </Row>
+              </>)}
+
+              {product === "DCD" && (
+                <Row name="Deposit Currency">
+                  <Sel v={depCcy} set={setDepCcy} opts={[BASE, QUOTE]} />
+                </Row>
+              )}
+
+              <Row name={product === "DCD" ? "Deposit Notional" : "Notional"}
+                caption={product === "DCD" ? "placed for the full term"
+                  : product === "VAN"
+                  ? (notionalCcy === QUOTE ? `= ${fmtBig((+notional || 0) / (+vanStrike || 1))} ${BASE} at the strike` : `${BASE} notional of the option`)
+                  : notionalMode === "Total"
+                  ? `= ${fmtBig((+notional || 0) / Math.max(1, Math.round(+nFix || 1)))} ${notionalCcy} per fixing`
+                  : `= ${fmtBig((+notional || 0) * Math.max(1, Math.round(+nFix || 1)))} ${notionalCcy} total`}>
+                {isMC ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 128px 88px", gap: 10 }}>
+                    <NotionalInput v={notional} set={setNotional} />
+                    <Sel v={notionalMode} set={setNotionalMode} opts={["Total", "Per fixing"]} />
+                    <Sel v={notionalCcy} set={setNotionalCcy} opts={[BASE, QUOTE]} />
+                  </div>
+                ) : product === "VAN" ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 88px", gap: 10 }}>
+                    <NotionalInput v={notional} set={setNotional} />
+                    <Sel v={notionalCcy} set={setNotionalCcy} opts={[BASE, QUOTE]} />
+                  </div>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 88px", gap: 10 }}>
+                    <NotionalInput v={notional} set={setNotional} />
+                    <div style={{ ...input, textAlign: "center", color: C.mute }}>{depCcy}</div>
+                  </div>
+                )}
+              </Row>
+
+              {product === "TARF" && !isCount && (
+                <Row name={<span>CIV Target{" "}
                     <span onClick={() => setShowCivHelp(v => !v)}
                       style={{ display: "inline-flex", alignItems: "center", justifyContent: "center",
                         width: 15, height: 15, borderRadius: 8, marginLeft: 4, cursor: "pointer",
                         border: `1px solid ${showCivHelp ? C.blue : C.faint}`,
                         color: showCivHelp ? C.blue : C.faint, fontSize: 10, fontWeight: 700,
-                        verticalAlign: "middle" }}>?</span>
-                  </span>
+                        verticalAlign: "middle" }}>?</span></span>}
+                  caption={`= ${fmt((+civ || 0) * 100, 0)} figures of accumulated gain`}>
                   <Num v={civ} set={setCiv} step="0.05" min="0" />
-                  <div style={{ fontSize: 11, color: C.faint, marginTop: 5, fontFamily: mono }}>
-                    = {fmt((+civ || 0) * 100, 0)} figures of accumulated gain
-                  </div>
                   {showCivHelp && (
                     <div style={{ marginTop: 8, padding: "10px 12px", background: "rgba(74,125,240,0.07)",
                       border: `1px solid rgba(74,125,240,0.35)`, borderRadius: 10,
                       fontSize: 11.5, color: C.mute, lineHeight: 1.55 }}>
-                      1 CIV = 100 figures. 1 figure = 0.0100 in EURUSD terms: a move from 1.1500 to 1.1600
-                      is 1 figure. The trade knocks out once the sum of in the money fixings reaches
+                      1 CIV = 100 figures and 1 figure = 100 pips ({(PC.pip * 100).toFixed(PC.dec)} in {pair}
+                      rate terms). The trade knocks out once the sum of in the money fixings reaches
                       CIV × 100 figures of accumulated intrinsic value.
                     </div>
                   )}
-                </div>
-                )}
-                <Field name="Settlement at knock out">
-                  <Sel v={koConv} set={setKoConv} opts={["full", "capped", "none"]} /></Field>
-                <Field name="Payment timing"
-                  hint={payTiming === "Rolling" ? "each fixing settles on its date" : "all flows accumulate and pay at maturity"}>
-                  <Sel v={payTiming} set={setPayTiming} opts={["Rolling", "At maturity (ZC)"]} /></Field>
-                {!isEKI && !isPivotFam && (
-                  <div>
-                    <span style={label}>Leverage barrier</span>
+                </Row>
+              )}
+              {isCount && (
+                <Row name="Target # of Gains" caption="trade stops after this many ITM fixings">
+                  <Num v={countTarget} set={setCountTarget} step="1" min="1" />
+                </Row>
+              )}
+              {isCapLoss && (
+                <Row name="Loss Cap (CIV)"
+                  caption={`= ${fmt((+civLoss || 0) * 100, 0)} figures of accumulated leveraged loss`}>
+                  <Num v={civLoss} set={setCivLoss} step="0.05" min="0" />
+                </Row>
+              )}
+              {product === "TARF" && (
+                <Row name={isCapLoss ? "Gain KO Settlement" : "KO Settlement"}>
+                  <Sel v={koConv} set={setKoConv} opts={["full", "capped", "none"]} />
+                </Row>
+              )}
+              {isCapLoss && (
+                <Row name="Loss KO Settlement"
+                  caption="payment at the fixing that breaches the loss cap">
+                  <Sel v={koConvS} set={setKoConvS} opts={["full", "capped", "none"]} />
+                </Row>
+              )}
+
+              {isDirStrike && (
+                <Row name="Strike"
+                  caption={product === "ACCU"
+                    ? (omega === 1 ? "below market, client accumulates here" : "above market")
+                    : undefined}>
+                  <RateNum v={strike} set={setStrike} />
+                </Row>
+              )}
+
+              {isPivotFam && (<>
+                <Row name="Low Strike (Call)" caption={`client buys ${BASE} here below pivot`}>
+                  <RateNum v={kLow} set={setKLow} /></Row>
+                <Row name="Pivot Level"><RateNum v={pivotLvl} set={setPivotLvl} /></Row>
+                <Row name="High Strike (Put)" caption={`client sells ${BASE} here above pivot`}>
+                  <RateNum v={kHigh} set={setKHigh} /></Row>
+              </>)}
+              {isPivotEKI && (<>
+                <Row name="Low KI Barrier" caption="below Low Strike">
+                  <RateNum v={eLowBar} set={setELowBar} /></Row>
+                <Row name="High KI Barrier" caption="above High Strike">
+                  <RateNum v={eHighBar} set={setEHighBar} /></Row>
+              </>)}
+
+              {(product === "TARF" || product === "ACCU") && (
+                <Row name="Leverage Ratio"><Num v={leverage} set={setLeverage} step="0.5" min="1" /></Row>
+              )}
+
+              {product === "TARF" && !isEKI && !isPivotFam && (
+                <Row name="Leverage Barrier"
+                  caption={!levBarSameAsStrike ? undefined : "leverage applies beyond the strike"}>
+                  <div style={{ display: "grid", gridTemplateColumns: levBarSameAsStrike ? "1fr" : "auto 1fr", gap: 10, alignItems: "center" }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5,
                       color: C.mute, cursor: "pointer", height: 41 }}>
                       <input type="checkbox" checked={levBarSameAsStrike}
                         onChange={e => setLevBarSameAsStrike(e.target.checked)} />
                       same as strike
                     </label>
+                    {!levBarSameAsStrike && <RateNum v={levBar} set={setLevBar} />}
                   </div>
-                )}
-                {!levBarSameAsStrike && !isEKI && !isPivotFam && (
-                  <Field name="Leverage barrier level"><Num v={levBar} set={setLevBar} step="0.0001" /></Field>
-                )}
-              </div>
-
-              {isPivotEKI && (
-                <div style={{ marginTop: 18, padding: "16px 16px 14px", background: "rgba(200,154,75,0.06)",
-                  border: `1px solid rgba(200,154,75,0.35)`, borderRadius: 12 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13.5, color: "#C89A4B", marginBottom: 12 }}>
-                    European Knock In pair
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1.4fr", gap: 16 }}>
-                    <Field name="Low KI barrier" hint="below Low Strike">
-                      <Num v={eLowBar} set={setELowBar} step="0.0001" /></Field>
-                    <Field name="High KI barrier" hint="above High Strike">
-                      <Num v={eHighBar} set={setEHighBar} step="0.0001" /></Field>
-                    <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.55, alignSelf: "end", paddingBottom: 6 }}>
-                      Fixing between a strike and its KI barrier: no obligation, the client participates at market.
-                      Fixing beyond either barrier: the obligation knocks in at that strike on ×{leverage || "…"}
-                      of the notional. Observed per fixing, European style.
-                    </div>
-                  </div>
-                </div>
+                </Row>
               )}
+
+              {isLKO && (<>
+                <Row name="LKO Barrier" caption={omega === 1 ? "below strike" : "above strike"}>
+                  <RateNum v={lkoBar} set={setLkoBar} /></Row>
+                <Row name="LKO Observation">
+                  <Sel v={lkoStyle} set={setLkoStyle} opts={["European", "American"]} /></Row>
+                <Row name="LKO Variant"
+                  caption={lkoVariant === "Standard"
+                    ? "if triggered, loss side leverage drops to 0x for the remaining fixings"
+                    : "if triggered, the strategy terminates and the outstanding target is paid upfront"}>
+                  <Sel v={lkoVariant} set={setLkoVariant} opts={["Standard", "Accelerated"]} /></Row>
+              </>)}
 
               {isEKI && (
-                <div style={{ marginTop: 18, padding: "16px 16px 14px", background: "rgba(200,154,75,0.06)",
-                  border: `1px solid rgba(200,154,75,0.35)`, borderRadius: 12 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13.5, color: "#C89A4B", marginBottom: 12 }}>
-                    European Knock In
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 16 }}>
-                    <Field name="KI barrier" hint={omega === 1 ? "below strike" : "above strike"}>
-                      <Num v={ekiBar} set={setEkiBar} step="0.0001" /></Field>
-                    <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.55, alignSelf: "end", paddingBottom: 6 }}>
-                      Fixing between strike and KI barrier: no obligation on either party, the client
-                      participates at market. Fixing beyond the barrier: the client trades at the strike
-                      on ×{leverage || "…"} of the notional. Observed per fixing, European style.
-                    </div>
-                  </div>
-                </div>
+                <Row name="KI Barrier"
+                  caption={(omega === 1 ? "below strike · " : "above strike · ") +
+                    "no obligation between strike and barrier; beyond it, leveraged at the strike"}>
+                  <RateNum v={ekiBar} set={setEkiBar} />
+                </Row>
               )}
 
-              {isLKO && (
-                <div style={{ marginTop: 18, padding: "16px 16px 14px", background: "rgba(139,126,219,0.06)",
-                  border: `1px solid rgba(139,126,219,0.35)`, borderRadius: 12 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13.5, color: C.violet, marginBottom: 12 }}>
-                    Liability Knock Out
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-                    <Field name="LKO barrier" hint={omega === 1 ? "below strike" : "above strike"}>
-                      <Num v={lkoBar} set={setLkoBar} step="0.0001" /></Field>
-                    <Field name="Observation">
-                      <Sel v={lkoStyle} set={setLkoStyle} opts={["European", "American"]} /></Field>
-                    <Field name="Variant">
-                      <Sel v={lkoVariant} set={setLkoVariant} opts={["Standard", "Accelerated"]} /></Field>
-                  </div>
-                  <div style={{ fontSize: 11.5, color: C.faint, marginTop: 10, lineHeight: 1.55 }}>
-                    {lkoVariant === "Standard"
-                      ? "If triggered, loss side leverage drops to 0x for the remaining fixings: the client keeps the gain leg but faces no further obligations."
-                      : "If triggered, the strategy terminates immediately and the outstanding target balance is paid upfront to the client."}
-                    {" "}{lkoStyle === "European"
-                      ? "Observed on fixing dates only."
-                      : "Monitored continuously (Brownian bridge between fixings)."}
-                  </div>
-                </div>
+              {product === "ACCU" && (<>
+                <Row name="KO Barrier" caption={omega === 1 ? "above strike, cancels the trade" : "below strike, cancels the trade"}>
+                  <RateNum v={accKO} set={setAccKO} /></Row>
+                <Row name="KO Observation">
+                  <Sel v={accKoStyle} set={setAccKoStyle} opts={["European", "American"]} /></Row>
+              </>)}
+
+              {product === "DCD" && (<>
+                <Row name="Conversion Strike"
+                  caption={depCcy === BASE ? `converted into ${QUOTE} if fixing above` : `converted into ${BASE} if fixing below`}>
+                  <RateNum v={dcdStrike} set={setDcdStrike} /></Row>
+                <Row name="Bank Margin (% p.a.)" caption="deducted from the coupon">
+                  <Num v={dcdMargin} set={setDcdMargin} step="0.05" min="0" /></Row>
+              </>)}
+
+              {product === "VAN" && (
+                <Row name="Strike"><RateNum v={vanStrike} set={setVanStrike} /></Row>
               )}
 
-              <div style={{ fontSize: 12, color: C.faint, marginTop: 14, lineHeight: 1.55 }}>
-                {isPivotFam
-                  ? <>Above the pivot the client sells EUR at the High Strike; below it the client buys EUR at
-                    the Low Strike, on 100% of the per fixing notional.{" "}
-                    {isPivotEKI
-                      ? <>The leveraged obligation only knocks in beyond the KI barriers; between a strike and
-                        its barrier the client participates at market.</>
-                      : <>Beyond either strike the obligation runs on ×{leverage || "…"} of the notional.</>}{" "}
-                    Gains accrue toward the target; losses do not count toward it. USD notionals convert at the pivot.</>
-                  : <>{dirText}. Leverage ×{leverage || "…"} applies {lossSide}{" "}
-                    <span style={{ fontFamily: mono }}>{fmtRate(+effLevBar || 0)}</span>.
-                    Gains accrue toward the target; losses do not count toward it.</>}
+              <div style={{ fontSize: 12, color: C.faint, marginTop: 16, lineHeight: 1.55,
+                paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+                {product === "DCD"
+                  ? <>The client places a {depCcy} deposit and implicitly sells the bank a{" "}
+                    {depCcy === BASE ? `${BASE} call / ${QUOTE} put` : `${BASE} put / ${QUOTE} call`} struck at the conversion
+                    strike; the premium is returned as an enhanced coupon. At maturity the bank repays the
+                    weaker currency.</>
+                  : product === "VAN"
+                  ? <>European exercise, cash settled at expiry, priced closed form under Garman Kohlhagen.
+                    The client {vanSide === "Buy" ? "pays" : "receives"} the premium today.</>
+                  : product === "ACCU"
+                  ? <>100% of the per fixing notional on favourable fixings, ×{leverage || "…"} on unfavourable
+                    ones. If the {accKoStyle === "European" ? "fixing" : "spot path"} crosses the KO barrier,
+                    that fixing and all remaining fixings are cancelled.</>
+                  : isPivotFam
+                  ? <>Above the pivot the client sells {BASE} at the High Strike; below it the client buys {BASE} at
+                    the Low Strike.{" "}
+                    {isPivotEKI ? "Obligations only knock in beyond the KI barriers; participation in between."
+                      : `Beyond either strike the obligation runs on ×${leverage || "…"} of the notional.`}{" "}
+                    Gains accrue toward the target; losses never count. {QUOTE} notionals convert at the pivot.</>
+                  : isCapLoss
+                  ? <>Two accumulators run in parallel: gains accrue toward the long CIV target, leveraged
+                    losses accrue toward the loss cap. The trade knocks out when either side is reached, so the
+                    client's aggregate downside is bounded at the cap.</>
+                  : isCount
+                  ? <>Every favourable fixing pays 1x in full and counts one unit; the trade knocks out after
+                    the target number of gains. Unfavourable fixings pay ×{leverage || "…"} and never count.</>
+                  : <>Gains accrue toward the CIV target; losses pay ×{leverage || "…"} beyond{" "}
+                    <span style={{ fontFamily: mono }}>{fmtRate(+effLevBar || 0)}</span> and never count toward it.</>}
               </div>
-              </>)}
+            </div>
+
+            {/* ————— MARKET + DATES ————— */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <div style={card}>
+                <PanelTitle right={
+                  <button onClick={() => { fetchSpot(false); fetchCurves(); }} className="sp-btn"
+                    style={{ background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)", border: "none",
+                      color: "#fff", borderRadius: 8, padding: "5px 14px", fontSize: 11.5, fontWeight: 700,
+                      cursor: "pointer", fontFamily: sans }}>Reload All</button>
+                }>Market</PanelTitle>
+
+                <Row name="Spot Rate"
+                  caption={spotLive === undefined ? `fetching live ${pair}…`
+                    : spotLive && spotLive.rate ? `live ${spotLive.rate.toFixed(4)} · ${spotLive.src}`
+                    : "live feed unavailable · manual"}>
+                  <RateNum v={spot} set={setSpot} />
+                </Row>
+                <Row name={QUOTE + " Rate (%)"}>
+                  <Num v={rUSD} set={v => { touchedUSD.current = true; setRUSD(v); }} step="0.05" />
+                </Row>
+                <Row name={BASE + " Rate (%)"}
+                  caption={curves.loading ? "fetching yield curves…"
+                    : `${BASE} ${(BASE === "EUR" && curves.eurSrc) || (BASE === "USD" && curves.usdSrc) ? ((BASE === "EUR" ? curves.eurSrc : curves.usdSrc) + " @ " + fmt(matYears, 2) + "y") : "manual"} · ${QUOTE} ${(QUOTE === "EUR" && curves.eurSrc) || (QUOTE === "USD" && curves.usdSrc) ? (QUOTE === "EUR" ? curves.eurSrc : curves.usdSrc) : "manual"}`}>
+                  <Num v={rEUR} set={v => { touchedEUR.current = true; setREUR(v); }} step="0.05" />
+                </Row>
+                <Row name="Vol Input">
+                  <Sel v={volMode} set={setVolMode} opts={["Flat", "Smile"]} />
+                </Row>
+                {volMode === "Flat" ? (
+                  <Row name="Vol σ (%)"><Num v={sigma} set={setSigma} step="0.25" /></Row>
+                ) : (<>
+                  <Row name="ATM σ (%)"><Num v={sigma} set={setSigma} step="0.25" /></Row>
+                  <Row name="25Δ RR (%)"><Num v={rr25} set={setRR25} step="0.05" /></Row>
+                  <Row name="25Δ BF (%)"
+                    caption="Malz smile · each product priced at σ(strike)">
+                    <Num v={bf25} set={setBF25} step="0.05" /></Row>
+                </>)}
+                {isMC ? (
+                  <Row name="MC Paths"><Num v={nPaths} set={setNPaths} step="1000" min="2000" /></Row>
+                ) : (
+                  <Row name="Engine">
+                    <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
+                      color: C.mute }}>Closed form Garman Kohlhagen</div>
+                  </Row>
+                )}
+              </div>
+
+              <div style={card}>
+                <PanelTitle>Dates</PanelTitle>
+                <Row name="Trade Date">
+                  <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
+                    color: C.mute }}>{fmtDate(new Date())}</div>
+                </Row>
+                <Row name="Start Date">
+                  <input type="date" className="sp-input" value={startDate} style={input}
+                    onChange={e => setStartDate(e.target.value)} />
+                </Row>
+                {isMC && (<>
+                  <Row name="Frequency"><Sel v={freq} set={setFreq} opts={["Weekly", "Biweekly", "Monthly"]} /></Row>
+                  <Row name="Nb Fixings"><Num v={nFix} set={setNFix} step="1" min="1" /></Row>
+                  <Row name="Settlement Mode"
+                    caption={payTiming === "Rolling" ? "each fixing settles on its date" : "all flows accumulate and pay at maturity"}>
+                    <Sel v={payTiming} set={setPayTiming} opts={["Rolling", "At maturity (ZC)"]} /></Row>
+                  <Row name="Maturity">
+                    <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
+                      color: C.blue, fontWeight: 600 }}>{fmtDate(maturity)}</div>
+                  </Row>
+                </>)}
+                {product === "DCD" && (<>
+                  <Row name="Deposit Term">
+                    <Sel v={dcdTerm} set={setDcdTerm} opts={["2W", "1M", "2M", "3M", "6M", "12M"]} /></Row>
+                  <Row name="Day Count" caption="deposit interest accrual">
+                    <Sel v={dcdDayCount} set={setDcdDayCount} opts={["ACT/365", "ACT/360", "30/360", "ACT/ACT"]} /></Row>
+                  <Row name="Maturity">
+                    <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
+                      color: C.blue, fontWeight: 600 }}>{fmtDate(dcdMatDate(startDate, dcdTerm))}</div>
+                  </Row>
+                </>)}
+                {product === "VAN" && (<>
+                  <Row name="Expiry Term">
+                    <Sel v={vanTerm} set={setVanTerm} opts={["1W", "2W", "1M", "2M", "3M", "6M", "12M"]} /></Row>
+                  <Row name="Expiry Date">
+                    <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
+                      color: C.blue, fontWeight: 600 }}>{fmtDate(dcdMatDate(startDate, vanTerm))}</div>
+                  </Row>
+                </>)}
+              </div>
             </div>
           </div>
 
-          <div style={{ ...card, marginBottom: 26 }}>
-            <div style={cardTitle}>Schedule</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
-              <Field name="Start date">
-                <input type="date" className="sp-input" value={startDate} style={input}
-                  onChange={e => setStartDate(e.target.value)} />
-              </Field>
-              {product === "VAN" ? (<>
-                <Field name="Expiry term">
-                  <Sel v={vanTerm} set={setVanTerm} opts={["1W", "2W", "1M", "2M", "3M", "6M", "12M"]} /></Field>
-                <Field name="Expiry date (auto)">
-                  <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                    color: C.blue, fontWeight: 600 }}>
-                    {fmtDate(dcdMatDate(startDate, vanTerm))}
-                  </div>
-                </Field>
-                <Field name="Day count">
-                  <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                    color: C.mute }}>ACT/365</div>
-                </Field>
-              </>) : product === "DCD" ? (<>
-                <Field name="Deposit term">
-                  <Sel v={dcdTerm} set={setDcdTerm} opts={["2W", "1M", "2M", "3M", "6M", "12M"]} /></Field>
-                <Field name="Maturity (auto)">
-                  <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                    color: C.blue, fontWeight: 600 }}>
-                    {fmtDate(dcdMatDate(startDate, dcdTerm))}
-                  </div>
-                </Field>
-                <Field name="Day count" hint="deposit interest accrual">
-                  <Sel v={dcdDayCount} set={setDcdDayCount} opts={["ACT/365", "ACT/360", "30/360", "ACT/ACT"]} />
-                </Field>
-              </>) : (<>
-                <Field name="Frequency"><Sel v={freq} set={setFreq} opts={["Weekly", "Biweekly", "Monthly"]} /></Field>
-                <Field name="Number of fixings"><Num v={nFix} set={setNFix} step="1" min="1" /></Field>
-                <Field name="Maturity (auto)">
-                  <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                    color: C.blue, fontWeight: 600 }}>
-                    {fmtDate(maturity)}
-                  </div>
-                </Field>
-              </>)}
-            </div>
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, marginTop: 26 }}>
             <button onClick={runPricing} disabled={busy} className="sp-btn"
               style={{ padding: "16px 72px",
                 background: busy ? C.card2 : "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)",
@@ -1658,20 +2029,20 @@ export default function StructuredPricer() {
 
   /* ————————————————— PAGE 2 : RESULTS ————————————————— */
   const greekCards = res ? [
-    { id: "delta", name: "Delta", unit: "EUR equivalent", color: C.blue, val: fmtBigSigned(res.delta) },
-    { id: "delta", name: "Delta %", unit: "of EUR notional", color: C.text, val: fmtSigned(res.deltaPct, 1) + "%" },
+    { id: "delta", name: "Delta", unit: res.base + " equivalent", color: C.blue, val: fmtBigSigned(res.delta) },
+    { id: "delta", name: "Delta %", unit: "of " + res.base + " notional", color: C.text, val: fmtSigned(res.deltaPct, 1) + "%" },
     { id: "gamma", name: "Gamma", unit: "Δdelta per 1 figure", color: C.text, val: fmtBigSigned(res.gammaFig) },
-    { id: "vega", name: "Vega", unit: "EUR per 1 vol pt", color: C.blue, val: fmtBigSigned(res.vega / res.S0) },
-    { id: "theta", name: "Theta", unit: "EUR per day", color: C.text, val: fmtBigSigned(res.theta / res.S0) },
-    { id: "rho", name: "Rho USD / EUR", unit: "EUR per 1 bp", color: C.text,
+    { id: "vega", name: "Vega", unit: res.base + " per 1 vol pt", color: C.blue, val: fmtBigSigned(res.vega / res.S0) },
+    { id: "theta", name: "Theta", unit: res.base + " per day", color: C.text, val: fmtBigSigned(res.theta / res.S0) },
+    { id: "rho", name: "Rho " + res.quote + " / " + res.base, unit: res.base + " per 1 bp", color: C.text,
       val: `${fmtBigSigned(res.rhoUSD / res.S0)} / ${fmtBigSigned(res.rhoEUR / res.S0)}` },
   ] : [];
   const greekMeta = {
-    delta: { title: "Delta vs spot", unit: "EUR equivalent", keys: [["v", C.blue, "Delta"]] },
+    delta: { title: "Delta vs spot", unit: res.base + " equivalent", keys: [["v", C.blue, "Delta"]] },
     gamma: { title: "Gamma vs spot", unit: "Δdelta per 1 figure", keys: [["v", C.amber, "Gamma"]] },
-    vega:  { title: "Vega vs spot", unit: "EUR per 1 vol pt", keys: [["v", C.blue, "Vega"]] },
-    theta: { title: "Theta vs spot", unit: "EUR per day", keys: [["v", C.amber, "Theta"]] },
-    rho:   { title: "Rho vs spot", unit: "EUR per 1 bp",
+    vega:  { title: "Vega vs spot", unit: res.base + " per 1 vol pt", keys: [["v", C.blue, "Vega"]] },
+    theta: { title: "Theta vs spot", unit: res.base + " per day", keys: [["v", C.amber, "Theta"]] },
+    rho:   { title: "Rho vs spot", unit: res.base + " per 1 bp",
              keys: [["vUSD", C.blue, "Rho USD"], ["vEUR", C.red, "Rho EUR"]] },
   };
   const tickFmt = v => fmtBig(v);
@@ -1680,8 +2051,8 @@ export default function StructuredPricer() {
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: sans, padding: "28px 24px 60px" }}>
       <style>{GLOBAL_CSS}</style>
       <div className="sp-fade" style={{ maxWidth: 1180, margin: "0 auto" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 18,
-          paddingBottom: 16, borderBottom: `1px solid ${C.line}` }}>
+        <SiteHeader active="fx" onNav={nav} />
+        <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 18 }}>
           <button onClick={() => setPage("setup")} className="sp-btn"
             style={{ background: C.card2, border: `1px solid ${C.line}`, color: C.text,
               borderRadius: 10, padding: "9px 16px", fontSize: 13.5, cursor: "pointer", fontFamily: sans }}>
@@ -1694,6 +2065,12 @@ export default function StructuredPricer() {
             <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #8B7EDB)",
               WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Pricing</span>
           </div>
+          {res && (
+            <div style={{ fontSize: 11.5, color: C.faint, fontFamily: mono }}>
+              σ {fmt(res.sigUsed, 2)}%{res.volSmile ? " · smile at strike" : ""}
+              {res.kind === "VAN" || res.kind === "DCD" ? " · closed form" : " · Monte Carlo"}
+            </div>
+          )}
           <button onClick={runPricing} disabled={busy} className="sp-btn"
             style={{ marginLeft: "auto",
               background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)", border: "none", color: "#fff",
@@ -1710,7 +2087,7 @@ export default function StructuredPricer() {
               <div style={{ fontFamily: mono, fontSize: 30, marginTop: 6, fontVariantNumeric: "tabular-nums",
                 color: res.side === "Buy" ? C.red : C.green }}>
                 {res.side === "Buy" ? `(${bigRaw(res.premEUR)})` : "+" + bigRaw(res.premEUR)}{" "}
-                <span style={{ fontSize: 14, color: C.mute }}>EUR</span>
+                <span style={{ fontSize: 14, color: C.mute }}>{res.base}</span>
               </div>
               <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>
                 client {res.side === "Buy" ? "pays" : "receives"} today</div>
@@ -1719,10 +2096,10 @@ export default function StructuredPricer() {
               <div style={colHead}>Premium % / pips</div>
               <div style={{ fontFamily: mono, fontSize: 22, marginTop: 8 }}>{fmt(res.premPct, 3)}%</div>
               <div style={{ fontSize: 11, color: C.faint, marginTop: 4, fontFamily: mono }}>
-                of EUR notional · {fmt(res.pips, 1)} USD pips per EUR</div>
+                of {res.base} notional · {fmt(res.pips, 1)} {res.quote} pips per {res.base}</div>
             </div>
             <div style={{ padding: "20px 22px", borderLeft: `1px solid ${C.line}` }}>
-              <div style={colHead}>Premium in USD</div>
+              <div style={colHead}>Premium in {res.quote}</div>
               <div style={{ fontFamily: mono, fontSize: 22, marginTop: 8 }}>{fmtBig(res.premUSD)}</div>
               <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>settlement currency</div>
             </div>
@@ -1734,7 +2111,7 @@ export default function StructuredPricer() {
             <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14 }}>Option economics</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
               {[
-                ["Contract", (res.type === "Call" ? "EUR call / USD put" : "EUR put / USD call") + " · European"],
+                ["Contract", (res.type === "Call" ? `${res.base} call / ${res.quote} put` : `${res.base} put / ${res.quote} call`) + " · European"],
                 ["Expiry", res.term + " · " + res.expiry],
                 ["Forward", fmtRate(res.fwd)],
                 ["Moneyness K/F", fmt((res.K / res.fwd) * 100, 2) + "%"],
@@ -1806,7 +2183,7 @@ export default function StructuredPricer() {
             <div style={colHead}>PV (client side)</div>
             <div style={{ fontFamily: mono, fontSize: 30, marginTop: 6, fontVariantNumeric: "tabular-nums",
               color: res && res.pvEUR >= 0 ? C.green : C.red }}>
-              {res ? fmtBigSigned(res.pvEUR) : "…"} <span style={{ fontSize: 14, color: C.mute }}>EUR</span>
+              {res ? fmtBigSigned(res.pvEUR) : "…"} <span style={{ fontSize: 14, color: C.mute }}>{res ? res.base : ""}</span>
             </div>
           </div>
           <div style={{ padding: "20px 22px", borderLeft: `1px solid ${C.line}` }}>
@@ -1814,10 +2191,10 @@ export default function StructuredPricer() {
             <div style={{ fontFamily: mono, fontSize: 22, marginTop: 8,
               color: res && res.pvPct >= 0 ? C.green : C.red }}>
               {res ? fmtSigned(res.pvPct, 3) + "%" : "…"}</div>
-            <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>of EUR notional</div>
+            <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>of {res.base} notional</div>
           </div>
           <div style={{ padding: "20px 22px", borderLeft: `1px solid ${C.line}` }}>
-            <div style={colHead}>PV in USD</div>
+            <div style={colHead}>PV in {res ? res.quote : "quote ccy"}</div>
             <div style={{ fontFamily: mono, fontSize: 22, marginTop: 8,
               color: res && res.pvUSD >= 0 ? C.green : C.red }}>
               {res ? fmtBigSigned(res.pvUSD) : "…"}</div>
@@ -1841,8 +2218,8 @@ export default function StructuredPricer() {
               <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 12.5 }}>
                 <thead>
                   <tr>
-                    {["#", "Fixing date", "τ (yrs)", "Forward", "DF", "Amount EUR", "P live",
-                      ...(res.accOn ? ["P KO"] : []), "E[CF] EUR", "Σ E[CF]"].map((h, i) => (
+                    {["#", "Fixing date", "τ (yrs)", "Forward", "DF", `Amount ${res.base}`, "P live",
+                      ...(res.accOn ? ["P KO"] : []), `E[CF] ${res.base}`, "Σ E[CF]"].map((h, i) => (
                       <th key={h} style={{ position: "sticky", top: 0, background: C.card2, zIndex: 1,
                         padding: "9px 16px", textAlign: i < 2 ? "left" : "right",
                         fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
@@ -1999,6 +2376,9 @@ export default function StructuredPricer() {
             {res && res.countOn && <div style={{ fontFamily: mono, fontSize: 11.5, color: C.faint }}>
               knocks out after {res.targetCount} gaining fixings
             </div>}
+            {res && res.capLossOn && <div style={{ fontFamily: mono, fontSize: 11.5, color: C.faint }}>
+              loss cap {fmt(res.targetSFig, 0)} fig · P(loss KO) {fmt(res.lossKoProb, 1)}%
+            </div>}
             {res && res.accOn && <div style={{ fontFamily: mono, fontSize: 11.5, color: C.faint }}>
               {res.accStyle} KO at {fmtRate(res.koLevel)} · {res.payAtMat ? "ZC settlement" : "rolling settlement"}
             </div>}
@@ -2012,9 +2392,11 @@ export default function StructuredPricer() {
             : <PayoffDiagram res={res} C={C} mono={mono} sans={sans} />}
           <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>
             {res && res.kind === "VAN"
-              ? `Net position at expiry: intrinsic value ${res.side === "Buy" ? "minus the premium paid" : "minus intrinsic, plus the premium received"}. Breakeven is the strike ${res.type === "Call" ? "plus" : "minus"} the premium in USD pips per EUR.`
+              ? `Net position at expiry: intrinsic value ${res.side === "Buy" ? "minus the premium paid" : "minus intrinsic, plus the premium received"}. Breakeven is the strike ${res.type === "Call" ? "plus" : "minus"} the premium in ${res.quote} pips per ${res.base}.`
               : res && res.kind === "DCD"
               ? `Nominal redemption only, coupon excluded (the coupon of ${fmtBig(res.N * res.cpn)} ${res.depCcy} is paid regardless). Flat leg: nominal repaid in ${res.depCcy}. Sloped leg: the bank repays the alternative currency converted at the strike, so the ${res.depCcy} value of the nominal falls with the fixing. The amber marker is the breakeven including the coupon.`
+              : res && res.capLossOn
+              ? `Two knock outs: the gain leg stops at the long target (KO marker) and the leveraged loss leg is bounded by the loss cap: once accumulated leveraged losses reach ${fmt(res.targetSFig, 0)} figures the trade terminates, flooring the per fixing loss at the dashed level (CAP marker).`
               : res && res.countOn
               ? `No KO level on the spot axis: the trade terminates after the ${res.targetCount}th gaining fixing, whatever the size of each gain. Every favourable fixing pays 1x in full; unfavourable fixings pay ×${res.L} and never count.`
               : res && res.accOn
@@ -2105,9 +2487,11 @@ export default function StructuredPricer() {
             Forward to maturity: <span style={{ fontFamily: mono, color: C.text }}>
             {res ? fmtRate(res.fwd) : "…"}</span>.
             {res && res.kind === "VAN"
-              ? ` Mark to market of the position in EUR before expiry: the smooth curve above the expiry hockey stick is time value, largest at the strike where gamma and vega ${res.side === "Buy" ? "peak" : "trough"}.`
+              ? ` Mark to market of the position in ${res.base} before expiry: the smooth curve above the expiry hockey stick is time value, largest at the strike where gamma and vega ${res.side === "Buy" ? "peak" : "trough"}.`
               : res && res.kind === "DCD"
-              ? " Mark to market of the embedded short option in EUR (the deposit leg itself is excluded): most negative where the option is deepest in the bank's favour, with vega concentrated near the strike."
+              ? ` Mark to market of the embedded short option in ${res.base} (the deposit leg itself is excluded): most negative where the option is deepest in the bank's favour, with vega concentrated near the strike.`
+              : res && res.capLossOn
+              ? " The loss cap puts a floor under the downside: unlike the vanilla TARF whose PV dives linearly, here cumulative losses cannot exceed the cap, so the left tail of the profile flattens toward a bounded worst case."
               : res && res.countOn
               ? " Compared with a CIV TARF, the discrete version knocks out faster when spot drifts favourably (any small gain counts as one full unit), so its upside flattens earlier while the leveraged downside is identical."
               : res && res.accOn
