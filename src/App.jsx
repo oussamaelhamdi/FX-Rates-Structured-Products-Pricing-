@@ -96,6 +96,56 @@ function accrualFrac(start, end, conv) {
   }
   return days / 365; // ACT/365
 }
+function digCallGK(S, K, T, rd, rf, s) {
+  const sq = s * Math.sqrt(T);
+  const d2 = (Math.log(S / K) + (rd - rf - s * s / 2) * T) / sq;
+  return Math.exp(-rd * T) * normCdf(d2);
+}
+function digPutGK(S, K, T, rd, rf, s) {
+  const sq = s * Math.sqrt(T);
+  const d2 = (Math.log(S / K) + (rd - rf - s * s / 2) * T) / sq;
+  return Math.exp(-rd * T) * normCdf(-d2);
+}
+// KO observed at maturity only: truncated vanilla (exact)
+function koEuro(S, K, H, T, rd, rf, s, om) {
+  if (om === 1) return Math.max(gk(S, K, T, rd, rf, s).call - gk(S, H, T, rd, rf, s).call - (H - K) * digCallGK(S, H, T, rd, rf, s), 0);
+  return Math.max(gk(S, K, T, rd, rf, s).put - gk(S, H, T, rd, rf, s).put - (K - H) * digPutGK(S, H, T, rd, rf, s), 0);
+}
+// continuous KO: Reiner Rubinstein up-and-out call / down-and-out put (validated vs bridge MC)
+function koAmer(S, K, H, T, rd, rf, s, om) {
+  // knocked out already: spot at or beyond the barrier kills the option outright
+  if (om === 1 && S >= H) return 0;
+  if (om === -1 && S <= H) return 0;
+  const b = rd - rf, r = rd, sq = s * Math.sqrt(T), mu = (b - s * s / 2) / (s * s);
+  const phi = om === 1 ? 1 : -1, eta = om === 1 ? -1 : 1;
+  const x1 = Math.log(S / K) / sq + (1 + mu) * sq, x2 = Math.log(S / H) / sq + (1 + mu) * sq;
+  const y1 = Math.log(H * H / (S * K)) / sq + (1 + mu) * sq, y2 = Math.log(H / S) / sq + (1 + mu) * sq;
+  const A = phi * S * Math.exp((b - r) * T) * normCdf(phi * x1) - phi * K * Math.exp(-r * T) * normCdf(phi * (x1 - sq));
+  const Bf = phi * S * Math.exp((b - r) * T) * normCdf(phi * x2) - phi * K * Math.exp(-r * T) * normCdf(phi * (x2 - sq));
+  const Cf = phi * S * Math.exp((b - r) * T) * Math.pow(H / S, 2 * (mu + 1)) * normCdf(eta * y1) - phi * K * Math.exp(-r * T) * Math.pow(H / S, 2 * mu) * normCdf(eta * (y1 - sq));
+  const Df = phi * S * Math.exp((b - r) * T) * Math.pow(H / S, 2 * (mu + 1)) * normCdf(eta * y2) - phi * K * Math.exp(-r * T) * Math.pow(H / S, 2 * mu) * normCdf(eta * (y2 - sq));
+  return Math.max(A - Bf + Cf - Df, 0);
+}
+// probability of touching the barrier before T (continuous)
+function pHitBar(S, H, T, rd, rf, s, up) {
+  const nu = rd - rf - s * s / 2, sq = s * Math.sqrt(T);
+  if (up) { const a = Math.log(H / S); if (a <= 0) return 1;
+    return Math.min(1, normCdf((-a + nu * T) / sq) + Math.exp(2 * nu * a / (s * s)) * normCdf((-a - nu * T) / sq)); }
+  const a = Math.log(S / H); if (a <= 0) return 1;
+  return Math.min(1, normCdf((-a - nu * T) / sq) + Math.exp(-2 * nu * a / (s * s)) * normCdf((-a + nu * T) / sq));
+}
+// light 3-point smoothing for Monte Carlo greek profiles
+function smoothProf(a) {
+  return a.map((pt, i, arr) =>
+    i === 0 || i === arr.length - 1 ? pt : { ...pt, v: (arr[i - 1].v + 2 * pt.v + arr[i + 1].v) / 4 });
+}
+// one x-axis for the payoff diagram and every chart of a pricing
+function axisDomain(levels, S0) {
+  const ls = levels.filter(x => x != null && isFinite(x));
+  const lo0 = Math.min(...ls, S0), hi0 = Math.max(...ls, S0);
+  const pad = Math.max((hi0 - lo0) * 0.18, S0 * 0.035);
+  return { lo: lo0 - pad, hi: hi0 + pad };
+}
 function interpCurve(curve, t) {
   if (!curve || !curve.length) return null;
   if (t <= curve[0].t) return curve[0].r;
@@ -129,7 +179,7 @@ function priceEngine(params, z, u, nPaths, taus, collect) {
           lkoOn, H, lkoStyle, lkoVariant, ekiOn, E,
           pivotOn, kLow, kHigh, pivotL, pivotEkiOn, eLow, eHigh, payAtMat,
           accOn, koLevel, accStyle, countOn, targetCount,
-          capLossOn, targetS, koConvS } = params;
+          capLossOn, targetS, koConvS, accelOn, accelFA } = params;
   const n = taus.length;
   const mu = rd - rf;
   const dt = new Float64Array(n), drift = new Float64Array(n),
@@ -203,14 +253,16 @@ function priceEngine(params, z, u, nPaths, taus, collect) {
               terminate = true; koCount++;
             } else cash = amtEURperFix * intr;
           } else {
-            const newAcc = acc + intr;
+            // accelerator: the improved strike boosts every gaining fixing to d + FA·d²
+            const gIntr = accelOn ? intr + accelFA * intr * intr : intr;
+            const newAcc = acc + gIntr;
             if (newAcc >= target) {
-              let pay = intr;
+              let pay = gIntr;
               if (koConv === "capped") pay = Math.max(target - acc, 0);
               else if (koConv === "none") pay = 0;
               cash = amtEURperFix * pay;
               terminate = true; koCount++;
-            } else { acc = newAcc; cash = amtEURperFix * intr; }
+            } else { acc = newAcc; cash = amtEURperFix * gIntr; }
           }
         } else {
           if (pivotOn) {
@@ -311,12 +363,14 @@ const fmtDate = d => d ? `${String(d.getDate()).padStart(2,"0")} ${MONTHS[d.getM
 function PayoffDiagram({ res, C, mono, sans }) {
   if (!res) return null;
   const { K, B, L, omega, amtEURperFix: A, S0, lkoOn, H, ekiOn, E, accOn, koLevel,
-          countOn, targetCount, capLossOn } = res;
+          countOn, targetCount, capLossOn, accelOn, accelFA } = res;
   const tS = capLossOn ? (res.targetSRate != null ? res.targetSRate : res.targetSFig / 100) : 0;
   const capX = capLossOn ? K - omega * (tS / Math.max(L, 1)) : null;
+  const tR = res.targetRate != null ? res.targetRate : res.targetFig / 100;
   const t = accOn ? Math.abs(koLevel - K)
     : countOn ? Math.max(Math.abs(S0 - K) * 1.8, 0.028 * K)
-    : (res.targetRate != null ? res.targetRate : res.targetFig / 100);
+    : accelOn ? (accelFA > 1e-9 ? (Math.sqrt(1 + 4 * accelFA * tR) - 1) / (2 * accelFA) : tR)
+    : tR;
   const KO = K + omega * t;
   const W = 880, HH = 380, mL = 84, mR = 40, mT = 46, mB = 74;
   const iw = W - mL - mR, ih = HH - mT - mB;
@@ -325,9 +379,13 @@ function PayoffDiagram({ res, C, mono, sans }) {
   const lossDrawEnd = barrierS != null ? barrierS - omega * 0.22 * t : lossEnd;
   let x0 = Math.min(lossDrawEnd, B, K, KO, S0) - 0.06 * t;
   let x1 = Math.max(lossDrawEnd, B, K, KO, S0) + 0.30 * t;
+  if (res.axLo != null) { x0 = res.axLo; x1 = res.axHi; }
   const pay = s => {
     const intr = omega * (s - K);
-    if (intr > 0) return A * Math.min(intr, t);
+    if (intr > 0) {
+      const g = accelOn ? intr + accelFA * intr * intr : intr;
+      return A * Math.min(g, accelOn ? tR : t);
+    }
     if (lkoOn) {
       const beyondLKO = omega === 1 ? s <= H : s >= H;
       if (beyondLKO) return 0;
@@ -344,7 +402,7 @@ function PayoffDiagram({ res, C, mono, sans }) {
   const cv = 1 / S0;
   const lossFloorRef = lkoOn ? H : ekiOn ? lossDrawEnd : capLossOn ? capX : (omega === 1 ? x0 : x1);
   const lossFloorVal = capLossOn ? -A * tS : A * L * omega * (lossFloorRef - K);
-  const yTop = A * t;
+  const yTop = A * (accelOn ? tR : t);
   const yBot = Math.min(lossFloorVal, 0);
   const yMax = yTop * 1.18, yMin = yBot * 1.12 - yTop * 0.05;
   const X = s => mL + ((s - x0) / (x1 - x0)) * iw;
@@ -359,7 +417,7 @@ function PayoffDiagram({ res, C, mono, sans }) {
   const midGain = (K + KO) / 2;
   const midLoss = ekiOn ? (E + lossDrawEnd) / 2 : (B + lossEdgeS) / 2;
   const midPart = ekiOn ? (K + E) / 2 : null;
-  const title = capLossOn ? "Cap Loss TARF" : countOn ? "Discrete TARF" : accOn ? "Accumulator"
+  const title = accelOn ? "Accelerator TARF" : capLossOn ? "Cap Loss TARF" : countOn ? "Discrete TARF" : accOn ? "Accumulator"
     : lkoOn ? "Liability Knock Out TARF" : ekiOn ? "EKI TARF" : "Vanilla TARF";
   return (
     <svg viewBox={`0 0 ${W} ${HH}`} style={{ width: "100%", height: "auto", display: "block" }}>
@@ -418,10 +476,19 @@ function PayoffDiagram({ res, C, mono, sans }) {
           stroke={C.red} strokeWidth="2.6" strokeDasharray="6 5" />
         <text x={omega === 1 ? mL + 8 : W - mR - 8} textAnchor={omega === 1 ? "start" : "end"}
           y={Y(-A * tS) - 8} fontFamily={mono} fontSize="10.5" fill={C.red}>
-          loss capped at ({fmtBig(A * tS * cv)}) {res.base}
+          Loss capped at ({fmtBig(A * tS * cv)}) {res.base}
         </text>
       </g>)}
-      <line x1={X(K)} y1={Y0} x2={gainB} y2={Y(yTop)} stroke={C.green} strokeWidth="3.4" strokeLinecap="round" />
+      {accelOn ? (
+        <polyline
+          points={Array.from({ length: 25 }, (_, i) => {
+            const s = K + ((omega === 1 ? 1 : -1) * t * i) / 24;
+            return `${X(s)},${Y(pay(s))}`;
+          }).join(" ")}
+          fill="none" stroke={C.green} strokeWidth="3.4" strokeLinecap="round" />
+      ) : (
+        <line x1={X(K)} y1={Y0} x2={gainB} y2={Y(yTop)} stroke={C.green} strokeWidth="3.4" strokeLinecap="round" />
+      )}
       {!countOn && (<g>
         <line x1={gainB} y1={Y(yTop)} x2={gainB} y2={Y0} stroke={C.red} strokeWidth="2.6" strokeDasharray="6 5" />
         <line x1={gainB} y1={Y0} x2={omega === 1 ? W - mR : mL} y2={Y0}
@@ -468,10 +535,22 @@ function PayoffDiagram({ res, C, mono, sans }) {
         <text x={X(E)} y={Y0 + 76} textAnchor="middle" fontFamily={mono} fontSize="10.5" fill={C.text}>{fmtRate(E)}</text>
       </g>)}
       <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
-      <text x={X(S0)} y={pay(S0) > 0 ? Y0 + 18 : Y0 - 10} textAnchor="middle"
-        fontFamily={mono} fontSize="10" fill={C.blue}>
-        spot {fmtRate(S0)}
-      </text>
+      {(() => {
+        const below = pay(S0) > 0;
+        let sx = X(S0), anchor = "middle";
+        if (below) {
+          const stems = [X(K), ...(!countOn ? [gainB] : []), ...(lkoOn ? [X(H)] : []),
+            ...(ekiOn ? [X(E)] : []), ...(capLossOn ? [X(capX)] : [])];
+          const near = stems.find(tx => Math.abs(tx - sx) < 48);
+          if (near !== undefined) { anchor = sx >= near ? "start" : "end"; sx = near + (sx >= near ? 24 : -24); }
+        }
+        return (
+          <text x={sx} y={below ? Y0 + 18 : Y0 - 10} textAnchor={anchor}
+            fontFamily={mono} fontSize="10" fill={C.blue}>
+            Spot {fmtRate(S0)}
+          </text>
+        );
+      })()}
       <g>
         <circle cx={X(midGain)} cy={Y(pay(midGain)) - 24} r="14" fill={C.green} />
         <text x={X(midGain)} y={Y(pay(midGain)) - 20} textAnchor="middle" fontFamily={sans}
@@ -485,20 +564,20 @@ function PayoffDiagram({ res, C, mono, sans }) {
       {lkoOn && (
         <text x={omega === 1 ? X(H) - 8 : X(H) + 8} textAnchor={omega === 1 ? "end" : "start"}
           y={Y0 - 28} fontFamily={sans} fontSize="10.5" fontWeight="700" fill="#8B7EDB">
-          0x, no obligation
+          0x, No obligation
         </text>
       )}
       {ekiOn && (
         <text x={X(midPart)} textAnchor="middle" y={Y0 - 26} fontFamily={sans}
           fontSize="10.5" fontWeight="700" fill={C.green}>
-          participation at market
+          Participation at market
         </text>
       )}
       <text x={gainB > W - mR - 170 ? gainB - 10 : gainB + 8}
         textAnchor={gainB > W - mR - 170 ? "end" : "start"}
         y={Y(yTop) - 10} fontFamily={mono} fontSize="10.5" fill={C.green}>
-        {countOn ? "stops after gain #" + targetCount
-          : accOn ? "cancelled at KO" : "max +" + fmtBig(yTop * cv) + " " + res.base + " at KO"}
+        {countOn ? "Stops after gain #" + targetCount
+          : accOn ? "Cancelled at KO" : "Max +" + fmtBig(yTop * cv) + " " + res.base + " at KO"}
       </text>
     </svg>
   );
@@ -517,6 +596,7 @@ function VanillaDiagram({ res, C, mono, sans }) {
   const span = Math.max(Math.abs(breakeven - K) * 2.2, 0.06 * K);
   let x0 = Math.min(K, breakeven, S0) - 0.8 * span;
   let x1 = Math.max(K, breakeven, S0) + 0.8 * span;
+  if (res.axLo != null) { x0 = res.axLo; x1 = res.axHi; }
   const vals = [net(x0), net(x1), net(K), 0];
   const yMax = Math.max(...vals) * 1.2 + premEUR * 0.2;
   const yMin = Math.min(...vals) * 1.2 - premEUR * 0.2;
@@ -558,7 +638,7 @@ function VanillaDiagram({ res, C, mono, sans }) {
         {sign === 1 ? `(${bigRaw(premEUR)})` : "+" + bigRaw(premEUR)}
       </text>
       <text x={W - mR - 4} y={Y(-sign * premEUR) - 6} textAnchor="end" fontFamily={sans} fontSize="9.5" fill={C.faint}>
-        premium {sign === 1 ? "paid" : "received"}
+        Premium {sign === 1 ? "paid" : "received"}
       </text>
       {/* payoff, colored by sign around breakeven */}
       <polyline points={seg(x0, breakeven)} fill="none" stroke={leftNeg ? C.red : C.green}
@@ -573,14 +653,114 @@ function VanillaDiagram({ res, C, mono, sans }) {
       {/* breakeven */}
       <line x1={X(breakeven)} y1={mT + 22} x2={X(breakeven)} y2={Y0} stroke={C.amber} strokeDasharray="4 3" strokeWidth="1.4" />
       <text x={X(breakeven)} y={mT + 16} textAnchor="middle" fontFamily={mono} fontSize="10" fill={C.amber}>
-        breakeven {fmtRate(breakeven)}
+        Breakeven {fmtRate(breakeven)}
       </text>
       {/* spot */}
       <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
-      <text x={X(S0)} y={net(S0) > 0 ? Y0 + 18 : Y0 - 10} textAnchor="middle"
-        fontFamily={mono} fontSize="10" fill={C.blue}>
-        spot {fmtRate(S0)}
+      {(() => {
+        const below = net(S0) > 0;
+        let sx = X(S0), anchor = "middle";
+        if (below && Math.abs(X(K) - sx) < 48) {
+          anchor = sx >= X(K) ? "start" : "end";
+          sx = X(K) + (sx >= X(K) ? 24 : -24);
+        }
+        return (
+          <text x={sx} y={below ? Y0 + 18 : Y0 - 10} textAnchor={anchor}
+            fontFamily={mono} fontSize="10" fill={C.blue}>
+            Spot {fmtRate(S0)}
+          </text>
+        );
+      })()}
+    </svg>
+  );
+}
+
+/* ———————— sharkfin redemption diagram ———————— */
+function SharkfinDiagram({ res, C, mono, sans }) {
+  if (!res) return null;
+  const { S0, K, H, om, partPct, rebPct, maxCpnPct, depCcy } = res;
+  const W = 880, HH = 400, mL = 100, mR = 40, mT = 46, mB = 78;
+  const iw = W - mL - mR, ih = HH - mT - mB;
+  const span = Math.max(Math.abs(H - K) * 2.1, 0.06 * K);
+  let x0 = Math.min(K, H, S0) - 0.55 * span;
+  let x1 = Math.max(K, H, S0) + 0.55 * span;
+  if (res.axLo != null) { x0 = res.axLo; x1 = res.axHi; }
+  const yTopPct = 100 + Math.max(maxCpnPct, rebPct) * 1.28 + 1.5;
+  const yBotPct = 100 - Math.max(maxCpnPct, 3) * 0.45;
+  const X = s => mL + ((s - x0) / (x1 - x0)) * iw;
+  const Y = v => mT + ((yTopPct - v) / (yTopPct - yBotPct)) * ih;
+  const yFloor = Y(100), yPeak = Y(100 + maxCpnPct), yReb = Y(100 + rebPct);
+  const tagW = 26;
+  const finStart = om === 1 ? X(K) : X(H), finEnd = om === 1 ? X(H) : X(K);
+  return (
+    <svg viewBox={`0 0 ${W} ${HH}`} style={{ width: "100%", height: "auto", display: "block" }}>
+      <text x={W / 2} y={20} textAnchor="middle" fontFamily={sans} fontSize="15" fontWeight="700" fill={C.text}>
+        Sharkfin Note
       </text>
+      <text x={W / 2} y={38} textAnchor="middle" fontFamily={sans} fontSize="12.5" fill={C.mute}>
+        {depCcy} deposit · capital floor 100% ·{" "}
+        {om === 1 ? `call up & out, bullish ${res.base}` : `put down & out, bearish ${res.base}`} ·
+        redemption in % of nominal
+      </text>
+      {/* axes */}
+      <line x1={mL} y1={HH - mB} x2={W - mR + 6} y2={HH - mB} stroke={C.mute} strokeWidth="1.2" />
+      <polygon points={`${W - mR + 6},${HH - mB} ${W - mR - 2},${HH - mB - 4} ${W - mR - 2},${HH - mB + 4}`} fill={C.mute} />
+      <line x1={mL} y1={mT - 4} x2={mL} y2={HH - mB + 6} stroke={C.mute} strokeWidth="1.2" />
+      <text x={mL - 46} y={mT + ih / 2} transform={`rotate(-90 ${mL - 46} ${mT + ih / 2})`} textAnchor="middle"
+        fontFamily={sans} fontSize="11" letterSpacing="0.14em" fill={C.faint}>REDEMPTION %</text>
+      <text x={mL + iw / 2} y={HH - 14} textAnchor="middle" fontFamily={sans} fontSize="12" fontWeight="600" fill={C.mute}>
+        {res.pair} at maturity
+      </text>
+      {/* capital floor guide */}
+      <line x1={mL} y1={yFloor} x2={W - mR} y2={yFloor} stroke={C.line} strokeDasharray="3 4" />
+      <text x={mL + 8} y={yFloor - 8} textAnchor="start" fontFamily={mono} fontSize="10.5" fill={C.mute}>
+        Capital floor 100%
+      </text>
+      {/* pre-strike flat leg at 100 */}
+      <line x1={om === 1 ? mL : finEnd} y1={yFloor} x2={om === 1 ? finStart : W - mR} y2={yFloor}
+        stroke={C.green} strokeWidth="3.4" strokeLinecap="round" />
+      {/* fin */}
+      <line x1={om === 1 ? finStart : X(K)} y1={yFloor} x2={om === 1 ? finEnd : X(H)} y2={yPeak}
+        stroke={C.green} strokeWidth="3.4" strokeLinecap="round" />
+      {/* KO drop + post-KO leg at 100 + rebate */}
+      <line x1={X(H)} y1={yPeak} x2={X(H)} y2={yReb} stroke={C.red} strokeWidth="2.6" strokeDasharray="6 5" />
+      <line x1={X(H)} y1={yReb} x2={om === 1 ? W - mR : mL} y2={yReb} stroke={C.red} strokeWidth="3.4" strokeLinecap="round" />
+      {/* peak annotation */}
+      <text x={X(H) + (om === 1 ? -8 : 8)} y={yPeak - 10} textAnchor={om === 1 ? "end" : "start"}
+        fontFamily={mono} fontSize="10.5" fill={C.green}>
+        Max coupon +{fmt(maxCpnPct, 2)}%
+      </text>
+      <text x={om === 1 ? W - mR - 4 : mL + 4} y={yReb - 8} textAnchor={om === 1 ? "end" : "start"}
+        fontFamily={mono} fontSize="10.5" fill={C.red}>
+        After KO: 100% {rebPct > 0 ? `+ ${fmt(rebPct, 2)}% rebate` : "only"}
+      </text>
+      {/* K tag */}
+      <line x1={X(K)} y1={HH - mB} x2={X(K)} y2={HH - mB + 26} stroke={C.text} strokeDasharray="3 3" strokeWidth="1" />
+      <rect x={X(K) - tagW / 2} y={HH - mB + 26} width={tagW} height={20} rx="3" fill="#060A14" stroke={C.text} strokeWidth="0.8" />
+      <text x={X(K)} y={HH - mB + 40} textAnchor="middle" fontFamily={mono} fontSize="11.5" fontWeight="700" fill="#FFFFFF">K</text>
+      <text x={X(K)} y={HH - mB + 60} textAnchor="middle" fontFamily={mono} fontSize="11" fill={C.text}>{fmtRate(K)}</text>
+      {/* KO house tag */}
+      <g>
+        <line x1={X(H)} y1={HH - mB} x2={X(H)} y2={HH - mB + 26} stroke={C.red} strokeDasharray="3 3" strokeWidth="1" />
+        <path d={`M ${X(H) - 17} ${HH - mB + 30} h34 v18 h-34 z M ${X(H) - 17} ${HH - mB + 30} L ${X(H)} ${HH - mB + 18} L ${X(H) + 17} ${HH - mB + 30} z`}
+          fill={C.red} />
+        <text x={X(H)} y={HH - mB + 43} textAnchor="middle" fontFamily={mono} fontSize="10.5" fontWeight="700" fill="#FFFFFF">KO</text>
+        <text x={X(H)} y={HH - mB + 62} textAnchor="middle" fontFamily={sans} fontSize="9.5" fontWeight="700" fill={C.red}>Barrier</text>
+        <text x={X(H)} y={HH - mB + 76} textAnchor="middle" fontFamily={mono} fontSize="10.5" fill={C.text}>{fmtRate(H)}</text>
+      </g>
+      {/* spot */}
+      <circle cx={X(S0)} cy={HH - mB} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
+      {(() => {
+        let sx = X(S0), anchor = "middle";
+        const stems = [X(K), X(H)];
+        const near = stems.find(tx => Math.abs(tx - sx) < 48);
+        if (near !== undefined) { anchor = sx >= near ? "start" : "end"; sx = near + (sx >= near ? 24 : -24); }
+        return (
+          <text x={sx} y={HH - mB - 10} textAnchor={anchor} fontFamily={mono} fontSize="10" fill={C.blue}>
+            Spot {fmtRate(S0)}
+          </text>
+        );
+      })()}
     </svg>
   );
 }
@@ -600,6 +780,7 @@ function DCDDiagram({ res, C, mono, sans }) {
   let x1 = conv ? K + 1.6 * span : K + 0.7 * span;
   x0 = Math.min(x0, S0 - 0.15 * span, breakeven - 0.15 * span);
   x1 = Math.max(x1, S0 + 0.15 * span, breakeven + 0.15 * span);
+  if (res.axLo != null) { x0 = res.axLo; x1 = res.axHi; }
   const edge = conv ? x1 : x0;
   const yMax = red * 1.05;
   const yMin = Math.min(redeem(edge), N) - (yMax - red) * 3;
@@ -637,11 +818,11 @@ function DCDDiagram({ res, C, mono, sans }) {
       </text>
       {/* nominal guide */}
       <line x1={mL} y1={Y(red)} x2={W - mR} y2={Y(red)} stroke={C.line} strokeDasharray="3 4" />
-      <text x={mL + 8} y={Y(red) - 6} textAnchor="start" fontFamily={mono} fontSize="10.5" fill={C.green}>
+      <text x={mL + 8} y={Y(red) - 10} textAnchor="start" fontFamily={mono} fontSize="10.5" fill={C.green}>
         {fmtBig(red)}
       </text>
-      <text x={W - mR - 4} y={Y(red) - 6} textAnchor="end" fontFamily={sans} fontSize="9.5" fill={C.faint}>
-        nominal
+      <text x={W - mR - 4} y={Y(red) - 10} textAnchor="end" fontFamily={sans} fontSize="9.5" fill={C.faint}>
+        Nominal
       </text>
       {/* protected flat leg (green) */}
       <line x1={conv ? X(x0) : X(K)} y1={Y(red)} x2={conv ? X(K) : X(x1)} y2={Y(red)}
@@ -656,22 +837,45 @@ function DCDDiagram({ res, C, mono, sans }) {
       {/* breakeven (incl. coupon) */}
       <line x1={X(breakeven)} y1={mT + 22} x2={X(breakeven)} y2={Ybase} stroke={C.amber} strokeDasharray="4 3" strokeWidth="1.4" />
       <text x={X(breakeven)} y={mT + 16} textAnchor="middle" fontFamily={mono} fontSize="10" fill={C.amber}>
-        breakeven incl. coupon {fmtRate(breakeven)}
+        Breakeven incl. coupon {fmtRate(breakeven)}
       </text>
       {/* spot */}
       <circle cx={X(S0)} cy={Ybase} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
-      <text x={X(S0)} y={Ybase - 10} textAnchor="middle" fontFamily={mono} fontSize="10" fill={C.blue}>
-        spot {fmtRate(S0)}
-      </text>
-      {/* region labels */}
-      <text x={conv ? X((x0 + K) / 2) : X((K + x1) / 2)} y={Y(red) - 12} textAnchor="middle"
-        fontFamily={sans} fontSize="10.5" fontWeight="700" fill={C.green}>
-        nominal repaid in {depCcy}
-      </text>
-      <text x={conv ? X((K + x1) / 2) : X((x0 + K) / 2)} y={Y(redeem(conv ? (K + x1) / 2 : (x0 + K) / 2)) - 14}
-        textAnchor="middle" fontFamily={sans} fontSize="10.5" fontWeight="700" fill={C.red}>
-        converted into {alt} at K
-      </text>
+      {(() => {
+        let sx = X(S0), anchor = "middle";
+        if (Math.abs(X(breakeven) - sx) < 42) {
+          anchor = sx >= X(breakeven) ? "start" : "end";
+          sx = X(breakeven) + (sx >= X(breakeven) ? 10 : -10);
+        }
+        return (
+          <text x={sx} y={Ybase - 10} textAnchor={anchor}
+            fontFamily={mono} fontSize="10" fill={C.blue}>
+            Spot {fmtRate(S0)}
+          </text>
+        );
+      })()}
+      {/* region labels: green sits under its flat leg, red sits under the tail of the curve */}
+      {(() => {
+        let gx = conv ? X((x0 + K) / 2) : X((K + x1) / 2);
+        if (Math.abs(gx - X(breakeven)) < 70) gx += gx >= X(breakeven) ? 55 : -55;
+        return (
+          <text x={gx} y={Y(red) + 18} textAnchor="middle"
+            fontFamily={sans} fontSize="10.5" fontWeight="700" fill={C.green}>
+            Nominal repaid in {depCcy}
+          </text>
+        );
+      })()}
+      {(() => {
+        // anchor beneath the low end of the curve: the region below its endpoint is always empty
+        const endS = conv ? x1 : x0;
+        const yLab = Math.min(Y(redeem(endS)) + 24, Ybase - 12);
+        return (
+          <text x={conv ? X(x1) - 2 : X(x0) + 2} y={yLab} textAnchor={conv ? "end" : "start"}
+            fontFamily={sans} fontSize="10.5" fontWeight="700" fill={C.red}>
+            Converted into {alt} at K
+          </text>
+        );
+      })()}
     </svg>
   );
 }
@@ -687,6 +891,7 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
   const span = kH - kL;
   let x0 = Math.min(ekip ? eL - 0.18 * span : kL - 0.30 * span, S0 - 0.05 * span);
   let x1 = Math.max(ekip ? eH + 0.18 * span : kH + 0.30 * span, S0 + 0.05 * span);
+  if (res.axLo != null) { x0 = res.axLo; x1 = res.axHi; }
   const cv = 1 / S0;
   const gLow = P - kL, gHigh = kH - P;
   const pay = s => {
@@ -808,16 +1013,24 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
           </g>
         ))}
         <text x={X((kL + eL) / 2)} textAnchor="middle" y={Y0 - 26} fontFamily={sans}
-          fontSize="9.5" fontWeight="700" fill={C.green}>participation</text>
+          fontSize="9.5" fontWeight="700" fill={C.green}>Participation</text>
         <text x={X((kH + eH) / 2)} textAnchor="middle" y={Y0 - 26} fontFamily={sans}
-          fontSize="9.5" fontWeight="700" fill={C.green}>participation</text>
+          fontSize="9.5" fontWeight="700" fill={C.green}>Participation</text>
       </g>)}
       {/* spot */}
       <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
-      <text x={X(S0)} y={pay(S0) > 0 ? Y0 + 18 : Y0 - 12} textAnchor="middle"
-        fontFamily={mono} fontSize="10" fill={C.blue}>
-        spot {fmtRate(S0)}
-      </text>
+      {(() => {
+        let sx = X(S0), anchor = "middle";
+        const legs = [X(kL), X(kH)];
+        const near = legs.find(tx => Math.abs(tx - sx) < 44);
+        if (near !== undefined) { anchor = sx >= near ? "start" : "end"; sx = near + (sx >= near ? 20 : -20); }
+        return (
+          <text x={sx} y={Y0 - 12} textAnchor={anchor}
+            fontFamily={mono} fontSize="10" fill={C.blue}>
+            Spot {fmtRate(S0)}
+          </text>
+        );
+      })()}
       {/* badges */}
       <g>
         <circle cx={X((kL + Math.min(kL + t, P)) / 2)} cy={Y(pay((kL + Math.min(kL + t, P)) / 2)) - 22} r="14" fill={C.green} />
@@ -1034,6 +1247,13 @@ export default function StructuredPricer() {
   const [countTarget, setCountTarget] = useState(5);
   const [civLoss, setCivLoss] = useState(0.60);
   const [koConvS, setKoConvS] = useState("capped");
+  const [accelFA, setAccelFA] = useState(2.00);
+  const [sharkDir, setSharkDir] = useState("Bullish");
+  const [sharkStrike, setSharkStrike] = useState(1.0850);
+  const [sharkBar, setSharkBar] = useState(1.1350);
+  const [sharkObs, setSharkObs] = useState("American");
+  const [sharkRebate, setSharkRebate] = useState(0.50);
+  const [sharkMargin, setSharkMargin] = useState(0.20);
   const [koConv, setKoConv] = useState("full");
   const [payTiming, setPayTiming] = useState("Rolling");
   const [accKO, setAccKO] = useState(1.1200);
@@ -1088,13 +1308,15 @@ export default function StructuredPricer() {
   const isPivotEKI = product === "TARF" && tarfType === "ekipivot";
   const isCount = product === "TARF" && tarfType === "count";
   const isCapLoss = product === "TARF" && tarfType === "caploss";
+  const isAccel = product === "TARF" && tarfType === "accel";
   const isPivotFam = isPivot || isPivotEKI;
   const tarfName = tarfType === "lko" ? "Liability Knock Out TARF"
     : tarfType === "eki" ? "EKI TARF"
     : tarfType === "pivot" ? "Pivot TARF"
     : tarfType === "ekipivot" ? "EKI Pivot TARF"
     : tarfType === "count" ? "Discrete TARF"
-    : tarfType === "caploss" ? "Cap Loss TARF" : "Vanilla TARF";
+    : tarfType === "caploss" ? "Cap Loss TARF"
+    : tarfType === "accel" ? "Accelerator TARF" : "Vanilla TARF";
 
   const nav = id => {
     if (id === "home") setPage("home");
@@ -1118,6 +1340,8 @@ export default function StructuredPricer() {
     setAccKO(rnd(s + 0.0350 * F));
     setDcdStrike(rnd(s));
     setVanStrike(rnd(s));
+    setSharkStrike(rnd(s));
+    setSharkBar(rnd(s + 0.0500 * F));
   }, []);
 
   const changePair = np => {
@@ -1216,7 +1440,7 @@ export default function StructuredPricer() {
   const matYears = (() => {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     let d;
-    if (product === "DCD") d = dcdMatDate(startDate, dcdTerm);
+    if (product === "DCD" || product === "SHARK") d = dcdMatDate(startDate, dcdTerm);
     else if (product === "VAN") d = dcdMatDate(startDate, vanTerm);
     else d = maturity;
     return d ? Math.max((d - today) / 86400000 / 365, 1 / 365) : 1;
@@ -1263,21 +1487,22 @@ export default function StructuredPricer() {
           const probITM = vanType === "Call" ? normCdf(g0.d2) : normCdf(-g0.d2);
           const breakeven = vanType === "Call" ? Kv + pxPerEUR : Kv - pxPerEUR;
           const fwdV = S0v * Math.exp((rd - rf) * T);
-          const hS = S0v * 0.001, hV = 0.005, hR = 0.001;
+          const hS = S0v * 0.001, hV = 0.005, hR = 0.001, hG = PC.pip * 1;
           const b0 = posUSD(S0v);
           const delta = (posUSD(S0v + hS) - posUSD(S0v - hS)) / (2 * hS);
-          const gamma = (posUSD(S0v + hS) - 2 * b0 + posUSD(S0v - hS)) / (hS * hS);
+          const gamma = (posUSD(S0v + hG) - 2 * b0 + posUSD(S0v - hG)) / (hG * hG);
           const vega = (posUSD(S0v, sig + hV) - posUSD(S0v, sig - hV)) / (2 * hV) * 0.01;
           const theta = posUSD(S0v, sig, rd, rf, Math.max(T - 1 / 365, 1e-6)) - b0;
           const rhoUSD = (posUSD(S0v, sig, rd + hR) - posUSD(S0v, sig, rd - hR)) / (2 * hR) * 0.0001;
           const rhoEUR = (posUSD(S0v, sig, rd, rf + hR) - posUSD(S0v, sig, rd, rf - hR)) / (2 * hR) * 0.0001;
-          const NS = 25, sLo = S0v * 0.90, sHi = S0v * 1.10;
+          const dom = axisDomain([Kv, breakeven], S0v);
+          const NS = 25, sLo = dom.lo, sHi = dom.hi;
           const prof = { delta: [], gamma: [], vega: [], theta: [], rho: [], pv: [] };
           for (let i = 0; i < NS; i++) {
             const s = +(sLo + ((sHi - sLo) * i) / (NS - 1)).toFixed(4);
             prof.pv.push({ s, v: posUSD(s) * cv0 });
-            prof.delta.push({ s, v: (posUSD(s + hS) - posUSD(s - hS)) / (2 * hS) });
-            prof.gamma.push({ s, v: (posUSD(s + hS) - 2 * posUSD(s) + posUSD(s - hS)) / (hS * hS) * 0.01 });
+            prof.delta.push({ s, v: (posUSD(s + hS) - posUSD(s - hS)) / (2 * hS) / eurN });
+            prof.gamma.push({ s, v: (posUSD(s + hG) - 2 * posUSD(s) + posUSD(s - hG)) / (hG * hG) * PC.pip / eurN });
             prof.vega.push({ s, v: (posUSD(s, sig + hV) - posUSD(s, sig - hV)) / (2 * hV) * 0.01 * cv0 });
             prof.theta.push({ s, v: (posUSD(s, sig, rd, rf, Math.max(T - 1 / 365, 1e-6)) - posUSD(s)) * cv0 });
             prof.rho.push({ s, vUSD: (posUSD(s, sig, rd + hR) - posUSD(s, sig, rd - hR)) / (2 * hR) * 0.0001 * cv0,
@@ -1285,15 +1510,137 @@ export default function StructuredPricer() {
           }
           setRes({
             kind: "VAN", name: vanSide + " " + pair + " " + vanType,
-            pair, base: BASE, quote: QUOTE,
+            pair, base: BASE, quote: QUOTE, axLo: dom.lo, axHi: dom.hi,
             sigUsed: sig * 100, volSmile: volMode !== "Flat",
             S0: S0v, K: Kv, side: vanSide, type: vanType, eurN, T,
             expiry: fmtDate(eDate), term: vanTerm,
             premEUR, premUSD, premPct: (premEUR / eurN) * 100, pips: pxPerEUR * 10000,
             probITM: probITM * 100, breakeven, fwd: fwdV,
-            delta, deltaPct: (delta / eurN) * 100, gammaFig: gamma * 0.01,
+            delta, deltaPct: (delta / eurN) * 100, gammaPip: gamma * PC.pip,
             vega, theta, rhoUSD, rhoEUR,
             prof, pivotOn: false, lkoOn: false, ekiOn: false, pivotEkiOn: false, accOn: false,
+          });
+          setSelGreek(null); setPage("results"); setBusy(false);
+          return;
+        }
+        if (product === "SHARK") {
+          const S0s = +spot, Ks = +sharkStrike, Hs = +sharkBar, rd = +rUSD / 100, rf = +rEUR / 100;
+          const Nn = +notional;
+          const omS = sharkDir === "Bullish" ? 1 : -1;
+          if (!(S0s > 0 && Ks > 0 && Hs > 0 && Nn > 0)) throw new Error("Check spot, strike, barrier and notional.");
+          if (omS === 1 && !(Hs > Ks)) throw new Error("Call up & out: the KO barrier must be above the strike.");
+          if (omS === -1 && !(Hs < Ks)) throw new Error("Put down & out: the KO barrier must be below the strike.");
+          const sDate = new Date(startDate + "T00:00:00");
+          const mDate = dcdMatDate(startDate, dcdTerm);
+          const today = new Date(); today.setHours(0, 0, 0, 0);
+          const T = Math.max((mDate - today) / 86400000 / 365, 1 / 365);
+          const tauAcc = accrualFrac(sDate, mDate, dcdDayCount);
+          const sig = volMode === "Flat" ? +sigma / 100
+            : smileVol(+sigma / 100, +rr25 / 100, +bf25 / 100, S0s * Math.exp((rd - rf) * T), Ks, T);
+          const depIsBase = depCcy === BASE;
+          const rDep = (depIsBase ? +rEUR : +rUSD) / 100;
+          const marg = (+sharkMargin || 0) / 100;
+          const reb = (+sharkRebate || 0) / 100;
+          const bud = Math.max((rDep - marg) * tauAcc, 0); // maturity value per 1 notional, in dep ccy
+
+          // ——— Monte Carlo engine: antithetic, seeded, Brownian bridge KO (exact continuous barrier) ———
+          const amerS = sharkObs === "American";
+          const nSt = amerS ? Math.min(60, Math.max(12, Math.round(T * 52))) : 1;
+          const NP2 = Math.max(1000, Math.min(500000, Math.round(+nPaths || 40000)));
+          const zS = makeNormals(NP2, nSt, 20240701);
+          const uS = makeUniforms(NP2, nSt, 91120033);
+          // returns risk-neutral (quote measure) moments of the note payoff pieces
+          const runShark = (o = {}, np = NP2) => {
+            const S0x = o.S0 !== undefined ? o.S0 : S0s;
+            const sg = o.sig !== undefined ? o.sig : sig;
+            const rdd = o.rd !== undefined ? o.rd : rd;
+            const rff = o.rf !== undefined ? o.rf : rf;
+            const TT = o.T !== undefined ? o.T : T;
+            const dt = TT / nSt, drift = (rdd - rff - sg * sg / 2) * dt, vs = sg * Math.sqrt(dt);
+            let ePerf = 0, ePerfS = 0, eKO = 0, eKOS = 0;
+            for (let pth = 0; pth < np; pth++) {
+              const base = pth * nSt;
+              let x = S0x, dead = false;
+              for (let i = 0; i < nSt; i++) {
+                const xp = x;
+                x = x * Math.exp(drift + vs * zS[base + i]);
+                if (!dead) {
+                  const crossed = omS === 1 ? x >= Hs : x <= Hs;
+                  if (crossed) dead = true;
+                  else if (amerS && vs > 0) {
+                    const a1 = omS === 1 ? Math.log(Hs / xp) : Math.log(xp / Hs);
+                    const a2 = omS === 1 ? Math.log(Hs / x) : Math.log(x / Hs);
+                    if (a1 > 0 && a2 > 0 && uS[base + i] < Math.exp(-2 * a1 * a2 / (vs * vs))) dead = true;
+                  }
+                }
+              }
+              if (dead) { eKO += 1; eKOS += x; }
+              else {
+                const perf = Math.max(omS * (x - Ks), 0) / Ks;
+                ePerf += perf; ePerfS += perf * x;
+              }
+            }
+            return { ePerf: ePerf / np, ePerfS: ePerfS / np, pKO: eKO / np, eKOS: eKOS / np };
+          };
+
+          const base0 = runShark();
+          const Ffwd = S0s * Math.exp((rd - rf) * T);
+          // participation solved from the budget in the DEPOSIT currency measure (exact, incl. quanto)
+          const EperfDep = depIsBase ? base0.ePerfS / Ffwd : base0.ePerf;
+          const pKODep = depIsBase ? base0.eKOS / Ffwd : base0.pKO;
+          const partRaw = EperfDep > 1e-12 ? (bud - reb * pKODep) / EperfDep : 0;
+          const part = Math.max(partRaw, 0);
+          const maxCpn = part * omS * (Hs - Ks) / Ks;
+          const pKO = base0.pKO;
+
+          // package value in QUOTE (participation + rebate legs), participation fixed at the solve
+          const pkgQuote = (m, rdd = rd, TT = T) =>
+            Nn * Math.exp(-rdd * TT) * (depIsBase
+              ? part * m.ePerfS + reb * m.eKOS
+              : part * m.ePerf + reb * m.pKO);
+          const posQuote = (o = {}, np = NP2) =>
+            pkgQuote(runShark(o, np), o.rd !== undefined ? o.rd : rd, o.T !== undefined ? o.T : T);
+
+          const cv0 = 1 / S0s;
+          const hS = S0s * 0.002, hV = 0.005, hR = 0.001, hG = S0s * 0.0025;
+          const b0 = pkgQuote(base0);
+          const delta = (posQuote({ S0: S0s + hS }) - posQuote({ S0: S0s - hS })) / (2 * hS);
+          const gamma = (posQuote({ S0: S0s + hG }) - 2 * b0 + posQuote({ S0: S0s - hG })) / (hG * hG);
+          const vega = (posQuote({ sig: sig + hV }) - posQuote({ sig: sig - hV })) / (2 * hV) * 0.01;
+          const theta = posQuote({ T: Math.max(T - 1 / 365, 1e-6) }) - b0;
+          const rhoUSD = (posQuote({ rd: rd + hR }) - posQuote({ rd: rd - hR })) / (2 * hR) * 0.0001;
+          const rhoEUR = (posQuote({ rf: rf + hR }) - posQuote({ rf: rf - hR })) / (2 * hR) * 0.0001;
+          const eurEqN = depIsBase ? Nn : Nn / S0s;
+          const dom = axisDomain([Ks, Hs], S0s);
+          const NS = 25, sLo = dom.lo, sHi = dom.hi;
+          const npLad = Math.min(NP2, Math.max(8000, Math.round(NP2 / 3)));
+          const prof = { delta: [], gamma: [], vega: [], theta: [], rho: [], pv: [] };
+          for (let i = 0; i < NS; i++) {
+            const s = +(sLo + ((sHi - sLo) * i) / (NS - 1)).toFixed(4);
+            const v0 = posQuote({ S0: s }, npLad);
+            const vp = posQuote({ S0: s + hG }, npLad), vm = posQuote({ S0: s - hG }, npLad);
+            prof.pv.push({ s, v: v0 * cv0 });
+            prof.delta.push({ s, v: (vp - vm) / (2 * hG) });
+            prof.gamma.push({ s, v: (vp - 2 * v0 + vm) / (hG * hG) * PC.pip });
+            prof.vega.push({ s, v: (posQuote({ S0: s, sig: sig + hV }, npLad) - posQuote({ S0: s, sig: sig - hV }, npLad)) / (2 * hV) * 0.01 * cv0 });
+            prof.theta.push({ s, v: (posQuote({ S0: s, T: Math.max(T - 1 / 365, 1e-6) }, npLad) - v0) * cv0 });
+            prof.rho.push({ s, vUSD: (posQuote({ S0: s, rd: rd + hR }, npLad) - posQuote({ S0: s, rd: rd - hR }, npLad)) / (2 * hR) * 0.0001 * cv0,
+                               vEUR: (posQuote({ S0: s, rf: rf + hR }, npLad) - posQuote({ S0: s, rf: rf - hR }, npLad)) / (2 * hR) * 0.0001 * cv0 });
+          }
+          prof.gamma = smoothProf(smoothProf(prof.gamma));
+          setRes({
+            kind: "SHARK", name: "Sharkfin Note · " + (omS === 1 ? "Bullish " + BASE : "Bearish " + BASE),
+            pair, base: BASE, quote: QUOTE, axLo: dom.lo, axHi: dom.hi,
+            sigUsed: sig * 100, volSmile: volMode !== "Flat",
+            S0: S0s, K: Ks, H: Hs, om: omS, obs: sharkObs, depCcy, N: Nn, T,
+            expiry: fmtDate(mDate), term: dcdTerm,
+            partPct: part * 100, maxCpnPct: maxCpn * 100, pKOPct: pKO * 100,
+            rebPct: reb * 100, budPct: bud * 100, rDepPct: rDep * 100, margPct: marg * 100,
+            nPathsUsed: NP2, nStepsUsed: nSt,
+            quanto: false, shortBudget: partRaw < 0,
+            delta, deltaPct: (delta / Math.max(eurEqN, 1e-9)) * 100, gammaPip: gamma * PC.pip,
+            vega, theta, rhoUSD, rhoEUR, prof,
+            pivotOn: false, lkoOn: false, ekiOn: false, pivotEkiOn: false, accOn: false, countOn: false, capLossOn: false,
           });
           setSelGreek(null); setPage("results"); setBusy(false);
           return;
@@ -1325,22 +1672,23 @@ export default function StructuredPricer() {
           const prob = depCcy === BASE ? normCdf(g0.d2) : normCdf(-g0.d2);
           const cpn = rEnh * tauAcc;
           const breakeven = depCcy === BASE ? Kd * (1 + cpn) : Kd / (1 + cpn);
-          const hS = S0d * 0.001, hV = 0.005, hR = 0.001;
+          const hS = S0d * 0.001, hV = 0.005, hR = 0.001, hG = PC.pip * 1;
           const b0 = posUSD(S0d);
           const delta = (posUSD(S0d + hS) - posUSD(S0d - hS)) / (2 * hS);
-          const gamma = (posUSD(S0d + hS) - 2 * b0 + posUSD(S0d - hS)) / (hS * hS);
+          const gamma = (posUSD(S0d + hG) - 2 * b0 + posUSD(S0d - hG)) / (hG * hG);
           const vega = (posUSD(S0d, sig + hV) - posUSD(S0d, sig - hV)) / (2 * hV) * 0.01;
           const theta = posUSD(S0d, sig, rd, rf, Math.max(T - 1 / 365, 1e-6)) - b0;
           const rhoUSD = (posUSD(S0d, sig, rd + hR) - posUSD(S0d, sig, rd - hR)) / (2 * hR) * 0.0001;
           const rhoEUR = (posUSD(S0d, sig, rd, rf + hR) - posUSD(S0d, sig, rd, rf - hR)) / (2 * hR) * 0.0001;
           const eurEquivN = depCcy === BASE ? Nd : Nd / Kd;
-          const NS = 25, sLo = S0d * 0.90, sHi = S0d * 1.10;
+          const dom = axisDomain([Kd, bev], S0d);
+          const NS = 25, sLo = dom.lo, sHi = dom.hi;
           const prof = { delta: [], gamma: [], vega: [], theta: [], rho: [], pv: [] };
           for (let i = 0; i < NS; i++) {
             const s = +(sLo + ((sHi - sLo) * i) / (NS - 1)).toFixed(4);
             prof.pv.push({ s, v: posUSD(s) * cv0 });
             prof.delta.push({ s, v: (posUSD(s + hS) - posUSD(s - hS)) / (2 * hS) });
-            prof.gamma.push({ s, v: (posUSD(s + hS) - 2 * posUSD(s) + posUSD(s - hS)) / (hS * hS) * 0.01 });
+            prof.gamma.push({ s, v: (posUSD(s + hG) - 2 * posUSD(s) + posUSD(s - hG)) / (hG * hG) * PC.pip });
             prof.vega.push({ s, v: (posUSD(s, sig + hV) - posUSD(s, sig - hV)) / (2 * hV) * 0.01 * cv0 });
             prof.theta.push({ s, v: (posUSD(s, sig, rd, rf, Math.max(T - 1 / 365, 1e-6)) - posUSD(s)) * cv0 });
             prof.rho.push({ s, vUSD: (posUSD(s, sig, rd + hR) - posUSD(s, sig, rd - hR)) / (2 * hR) * 0.0001 * cv0,
@@ -1348,7 +1696,7 @@ export default function StructuredPricer() {
           }
           setRes({
             kind: "DCD", name: "Dual Currency Deposit",
-            pair, base: BASE, quote: QUOTE,
+            pair, base: BASE, quote: QUOTE, axLo: dom.lo, axHi: dom.hi,
             sigUsed: sig * 100, volSmile: volMode !== "Flat",
             S0: S0d, K: Kd, depCcy, N: Nd, T, cpn, maturity: fmtDate(mDate), term: dcdTerm,
             dayCount: dcdDayCount,
@@ -1356,7 +1704,7 @@ export default function StructuredPricer() {
             premDep, premPct: (premDep / Nd) * 100, prob: prob * 100, breakeven,
             fwd: S0d * Math.exp((rd - rf) * T),
             optName: depCcy === BASE ? `short ${BASE} call / ${QUOTE} put` : `short ${BASE} put / ${QUOTE} call`,
-            delta, deltaPct: (delta / eurEquivN) * 100, gammaFig: gamma * 0.01,
+            delta, deltaPct: (delta / eurEquivN) * 100, gammaPip: gamma * PC.pip,
             vega, theta, rhoUSD, rhoEUR,
             prof, pivotOn: false, lkoOn: false, ekiOn: false, pivotEkiOn: false,
           });
@@ -1424,14 +1772,15 @@ export default function StructuredPricer() {
           pivotEkiOn: isPivotEKI, eLow: ELB, eHigh: EHB, payAtMat,
           accOn: isACC, koLevel: KOL, accStyle: accKoStyle,
           countOn: isCount, targetCount: nGainTarget,
-          capLossOn: isCapLoss, targetS, koConvS };
+          capLossOn: isCapLoss, targetS, koConvS,
+          accelOn: isAccel, accelFA: +accelFA || 0 };
         const P = (over, np = NP, tt = taus) => priceEngine({ ...base, ...over }, z, u, np, tt).pv;
         const r0 = priceEngine(base, z, u, NP, taus, true);
 
-        const hS = S0 * 0.001;
+        const hS = S0 * 0.001, hGm = S0 * 0.0025;
         const pvUp = P({ S0: S0 + hS }), pvDn = P({ S0: S0 - hS });
         const delta = (pvUp - pvDn) / (2 * hS);
-        const gamma = (pvUp - 2 * r0.pv + pvDn) / (hS * hS);
+        const gamma = (P({ S0: S0 + hGm }) - 2 * r0.pv + P({ S0: S0 - hGm })) / (hGm * hGm);
         const hV = 0.005;
         const vega = (P({ sigma: sig + hV }) - P({ sigma: sig - hV })) / (2 * hV) * 0.01;
         const tauTheta = taus.map(t2 => Math.max(t2 - 1 / 365, 1e-6));
@@ -1441,7 +1790,18 @@ export default function StructuredPricer() {
         const rhoEUR = (P({ rf: rf + hR }) - P({ rf: rf - hR })) / (2 * hR) * 0.0001;
 
         const npLad = Math.min(NP, 8000);
-        const NS = 25, sLo = S0 * 0.90, sHi = S0 * 1.10;
+        const faV = +accelFA || 0;
+        const diagT = isACC ? Math.abs(KOL - K)
+          : isCount ? Math.max(Math.abs(S0 - K) * 1.8, 0.028 * K)
+          : isAccel ? (faV > 1e-9 ? (Math.sqrt(1 + 4 * faV * target) - 1) / (2 * faV) : target)
+          : target;
+        const domLvls = isPivotFam
+          ? [KL, KH, PL, ...(isPivotEKI ? [ELB, EHB] : [])]
+          : [K, ...(!isCount ? [K + omega * diagT] : []),
+             ...(isLKO ? [H] : []), ...(isEKI ? [EB] : []),
+             ...(isCapLoss ? [K - omega * (targetS / Math.max(L, 1))] : [])];
+        const dom = axisDomain(domLvls, S0);
+        const NS = 25, sLo = dom.lo, sHi = dom.hi;
         const grid = Array.from({ length: NS }, (_, i) => sLo + ((sHi - sLo) * i) / (NS - 1));
         const lad = o => grid.map(s => P({ S0: s, ...o }, npLad));
         const l0 = lad({});
@@ -1460,7 +1820,8 @@ export default function StructuredPricer() {
                      (l0[i + 1] - l0[i - 1]) / (2 * ds);
           prof.delta.push({ s, v: dl });
           if (i > 0 && i < NS - 1)
-            prof.gamma.push({ s, v: (l0[i + 1] - 2 * l0[i] + l0[i - 1]) / (ds * ds) * 0.01 });
+            prof.gamma.push({ s, v: (l0[i + 1] - 2 * l0[i] + l0[i - 1]) / (ds * ds) * PC.pip });
+            // (smoothed after the loop)
           prof.vega.push({ s, v: (lVu[i] - lVd[i]) / (2 * hV) * 0.01 * cv });
           prof.theta.push({ s, v: (lTh[i] - l0[i]) * cv });
           prof.rho.push({ s, vUSD: (lRdU[i] - lRdD[i]) / (2 * hR) * 0.0001 * cv,
@@ -1484,9 +1845,10 @@ export default function StructuredPricer() {
         setRes({
           fixings,
           sigUsed: sig * 100, volSmile: volMode !== "Flat",
-          pair, base: BASE, quote: QUOTE,
+          pair, base: BASE, quote: QUOTE, axLo: dom.lo, axHi: dom.hi,
           targetRate: (isACC || isCount) ? null : target, targetSRate: targetS,
           name: isACC ? "Accumulator · " + accKoStyle + " KO"
+            : isAccel ? "Accelerator TARF"
             : isCapLoss ? "Cap Loss TARF"
             : isCount ? "Discrete TARF"
             : isLKO ? "Liability Knock Out TARF" : isEKI ? "EKI TARF"
@@ -1494,14 +1856,15 @@ export default function StructuredPricer() {
           pvUSD: r0.pv, se: r0.se, pvEUR: r0.pv / S0,
           pvPct: (r0.pv / (totalEUR * S0)) * 100,
           delta, deltaPct: (delta / totalEUR) * 100,
-          gammaFig: gamma * 0.01, vega, theta, rhoUSD, rhoEUR,
+          gammaPip: gamma * PC.pip, vega, theta, rhoUSD, rhoEUR,
           koProb: r0.koProb * 100, lkoProb: r0.lkoProb * 100,
           ekiProb: r0.ekiProb * 100, expLife: r0.expLifeFix,
-          prof, fwd, n,
+          prof: { ...prof, gamma: smoothProf(smoothProf(prof.gamma)) }, fwd, n,
           amtEURperFix, targetFig: isACC ? Math.abs(KOL - K) * 100 : target * 100, S0, K, B, L, omega,
           accOn: isACC, koLevel: KOL, accStyle: accKoStyle,
           countOn: isCount, targetCount: nGainTarget,
           capLossOn: isCapLoss, targetSFig: targetS * 100, koConvS,
+          accelOn: isAccel, accelFA: +accelFA || 0,
           lossKoProb: r0.lossKoProb * 100,
           lkoOn: isLKO, H, lkoStyle, lkoVariant, ekiOn: isEKI, E: EB,
           pivotOn: isPivotFam, kLow: KL, kHigh: KH, pivotL: PL,
@@ -1524,13 +1887,15 @@ export default function StructuredPricer() {
       isPivotFam, isPivotEKI, kLow, kHigh, pivotLvl, eLowBar, eHighBar, notionalMode,
       product, depCcy, dcdStrike, dcdTerm, dcdMargin, dcdDayCount, payTiming, accKO, accKoStyle,
       vanType, vanSide, vanStrike, vanTerm, isCount, countTarget, volMode, rr25, bf25,
-      isCapLoss, civLoss, koConvS, pair, BASE, QUOTE, PC]);
+      isCapLoss, civLoss, koConvS, isAccel, accelFA, pair, BASE, QUOTE, PC,
+      sharkDir, sharkStrike, sharkBar, sharkObs, sharkRebate, sharkMargin]);
 
   const products = [
     { id: "TARF", name: "TARF", desc: "Target redemption forward family: strip of leveraged forwards knocked out on accumulated gains", ready: true },
     { id: "ACCU", name: "Accumulator", desc: "Accumulative forward with a knock out barrier: European or American observation, rolling or ZC settlement", ready: true },
     { id: "DCD", name: "Dual Currency Deposit", desc: "Yield enhanced deposit: the client implicitly sells an FX option and earns its premium as extra coupon", ready: true },
     { id: "VAN", name: "Vanilla Option", desc: "European FX call or put, buy or sell, closed form Garman Kohlhagen", ready: true },
+    { id: "SHARK", name: "Sharkfin Note", desc: "Capital protected deposit with knock out participation: full capital back, upside via a call up & out or put down & out, rebate if the barrier is hit", ready: true },
   ];
   const tarfTypes = [
     { id: "vanilla", name: "Vanilla TARF", desc: "Leverage applies on every losing fixing until maturity or target knock out" },
@@ -1540,6 +1905,7 @@ export default function StructuredPricer() {
     { id: "ekipivot", name: "EKI Pivot TARF", desc: "Pivot TARF with a pair of European KI barriers: leveraged obligations only knock in beyond them, participation in between" },
     { id: "count", name: "Discrete TARF", desc: "Knocks out after a fixed number of gaining fixings, regardless of their size, instead of an accumulated CIV amount" },
     { id: "caploss", name: "Cap Loss TARF", desc: "Two targets: knocks out when accumulated gains reach the long target, or when accumulated leveraged losses reach the loss cap" },
+    { id: "accel", name: "Accelerator TARF", desc: "Gaining fixings trade at an improved strike: gain = d + F × d², so the target is reached faster. Losses stay a standard ×L at the original strike" },
   ];
 
   const dirText = omega === 1 ? `Client buys ${BASE} / sells ${QUOTE} at strike` : `Client buys ${QUOTE} / sells ${BASE} at strike`;
@@ -1732,9 +2098,19 @@ export default function StructuredPricer() {
                 </Row>
               </>)}
 
-              {product === "DCD" && (
+              {(product === "DCD" || product === "SHARK") && (
                 <Row name="Deposit Currency">
                   <Sel v={depCcy} set={setDepCcy} opts={[BASE, QUOTE]} />
+                </Row>
+              )}
+              {product === "SHARK" && (
+                <Row name="Direction"
+                  caption={sharkDir === "Bullish"
+                    ? `participation if ${BASE} rises, knocked out above the barrier`
+                    : `participation if ${BASE} falls, knocked out below the barrier`}>
+                  <Sel v={sharkDir === "Bullish" ? `Bullish ${BASE} · call up & out` : `Bearish ${BASE} · put down & out`}
+                    set={v => setSharkDir(v.startsWith("Bullish") ? "Bullish" : "Bearish")}
+                    opts={[`Bullish ${BASE} · call up & out`, `Bearish ${BASE} · put down & out`]} />
                 </Row>
               )}
 
@@ -1818,21 +2194,53 @@ export default function StructuredPricer() {
               )}
 
               {isPivotFam && (<>
-                <Row name="Low Strike (Call)" caption={`client buys ${BASE} here below pivot`}>
-                  <RateNum v={kLow} set={setKLow} /></Row>
-                <Row name="Pivot Level"><RateNum v={pivotLvl} set={setPivotLvl} /></Row>
-                <Row name="High Strike (Put)" caption={`client sells ${BASE} here above pivot`}>
-                  <RateNum v={kHigh} set={setKHigh} /></Row>
+                <Row name="Low Strike (Call)"
+                  caption={`client buys ${BASE} here below pivot · high strike mirrors automatically`}>
+                  <RateNum v={kLow} set={v => {
+                    setKLow(v);
+                    if (v !== "" && isFinite(+v) && isFinite(+pivotLvl))
+                      setKHigh(+(2 * +pivotLvl - +v).toFixed(PC.dec));
+                  }} /></Row>
+                <Row name="Pivot Level" caption="both strikes stay symmetric around the pivot">
+                  <RateNum v={pivotLvl} set={v => {
+                    const w = (isFinite(+kHigh) && isFinite(+kLow)) ? Math.abs(+kHigh - +kLow) / 2 : 0;
+                    setPivotLvl(v);
+                    if (v !== "" && isFinite(+v) && w > 0) {
+                      setKLow(+(+v - w).toFixed(PC.dec));
+                      setKHigh(+(+v + w).toFixed(PC.dec));
+                    }
+                  }} /></Row>
+                <Row name="High Strike (Put)"
+                  caption={`client sells ${BASE} here above pivot · low strike mirrors automatically`}>
+                  <RateNum v={kHigh} set={v => {
+                    setKHigh(v);
+                    if (v !== "" && isFinite(+v) && isFinite(+pivotLvl))
+                      setKLow(+(2 * +pivotLvl - +v).toFixed(PC.dec));
+                  }} /></Row>
               </>)}
               {isPivotEKI && (<>
-                <Row name="Low KI Barrier" caption="below Low Strike">
-                  <RateNum v={eLowBar} set={setELowBar} /></Row>
-                <Row name="High KI Barrier" caption="above High Strike">
-                  <RateNum v={eHighBar} set={setEHighBar} /></Row>
+                <Row name="Low KI Barrier" caption="below Low Strike · high barrier mirrors automatically">
+                  <RateNum v={eLowBar} set={v => {
+                    setELowBar(v);
+                    if (v !== "" && isFinite(+v) && isFinite(+pivotLvl))
+                      setEHighBar(+(2 * +pivotLvl - +v).toFixed(PC.dec));
+                  }} /></Row>
+                <Row name="High KI Barrier" caption="above High Strike · low barrier mirrors automatically">
+                  <RateNum v={eHighBar} set={v => {
+                    setEHighBar(v);
+                    if (v !== "" && isFinite(+v) && isFinite(+pivotLvl))
+                      setELowBar(+(2 * +pivotLvl - +v).toFixed(PC.dec));
+                  }} /></Row>
               </>)}
 
               {(product === "TARF" || product === "ACCU") && (
                 <Row name="Leverage Ratio"><Num v={leverage} set={setLeverage} step="0.5" min="1" /></Row>
+              )}
+              {isAccel && (
+                <Row name="F"
+                  caption={`improved strike = K ${omega === 1 ? "−" : "+"} F × (K − fixing)² on gaining fixings`}>
+                  <Num v={accelFA} set={setAccelFA} step="0.25" min="0" />
+                </Row>
               )}
 
               {product === "TARF" && !isEKI && !isPivotFam && (
@@ -1888,10 +2296,30 @@ export default function StructuredPricer() {
               {product === "VAN" && (
                 <Row name="Strike"><RateNum v={vanStrike} set={setVanStrike} /></Row>
               )}
+              {product === "SHARK" && (<>
+                <Row name="Strike" caption="participation starts here">
+                  <RateNum v={sharkStrike} set={setSharkStrike} /></Row>
+                <Row name="KO Barrier"
+                  caption={sharkDir === "Bullish" ? "above the strike, cancels the participation" : "below the strike, cancels the participation"}>
+                  <RateNum v={sharkBar} set={setSharkBar} /></Row>
+                <Row name="Barrier Observation"
+                  caption={sharkObs === "European" ? "checked at maturity only" : "monitored continuously until maturity"}>
+                  <Sel v={sharkObs} set={setSharkObs} opts={["European", "American"]} /></Row>
+                <Row name="Rebate if KO (%)" caption="paid at maturity on top of capital if knocked out">
+                  <Num v={sharkRebate} set={setSharkRebate} step="0.05" min="0" /></Row>
+                <Row name="Bank Margin (% p.a.)" caption="deducted from the interest budget">
+                  <Num v={sharkMargin} set={setSharkMargin} step="0.05" min="0" /></Row>
+              </>)}
 
               <div style={{ fontSize: 12, color: C.faint, marginTop: 16, lineHeight: 1.55,
                 paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
-                {product === "DCD"
+                {product === "SHARK"
+                  ? <>Capital is fully protected: the deposit interest, net of the margin, buys a{" "}
+                    {sharkDir === "Bullish" ? "call up & out" : "put down & out"} on {pair}. The participation is
+                    solved so the package is fair. If the barrier is {sharkObs === "European" ? "beyond at maturity" : "touched at any time"},
+                    the coupon is replaced by the rebate. Priced by Monte Carlo with exact settlement in the
+                    deposit currency.</>
+                  : product === "DCD"
                   ? <>The client places a {depCcy} deposit and implicitly sells the bank a{" "}
                     {depCcy === BASE ? `${BASE} call / ${QUOTE} put` : `${BASE} put / ${QUOTE} call`} struck at the conversion
                     strike; the premium is returned as an enhanced coupon. At maturity the bank repays the
@@ -1909,6 +2337,10 @@ export default function StructuredPricer() {
                     {isPivotEKI ? "Obligations only knock in beyond the KI barriers; participation in between."
                       : `Beyond either strike the obligation runs on ×${leverage || "…"} of the notional.`}{" "}
                     Gains accrue toward the target; losses never count. {QUOTE} notionals convert at the pivot.</>
+                  : isAccel
+                  ? <>Every gaining fixing trades at the improved strike K {omega === 1 ? "−" : "+"} F × (K − fixing)²:
+                    the client receives d + F × d² per fixing and the CIV target fills faster, so the trade
+                    knocks out sooner. Losing fixings stay a standard ×{leverage || "…"} at the original strike.</>
                   : isCapLoss
                   ? <>Two accumulators run in parallel: gains accrue toward the long CIV target, leveraged
                     losses accrue toward the loss cap. The trade knocks out when either side is reached, so the
@@ -1933,7 +2365,7 @@ export default function StructuredPricer() {
 
                 <Row name="Spot Rate"
                   caption={spotLive === undefined ? `fetching live ${pair}…`
-                    : spotLive && spotLive.rate ? `live ${spotLive.rate.toFixed(4)} · ${spotLive.src}`
+                    : spotLive && spotLive.rate ? `live ${spotLive.rate.toFixed(RATE_DEC)} · ${spotLive.src}`
                     : "live feed unavailable · manual"}>
                   <RateNum v={spot} set={setSpot} />
                 </Row>
@@ -1957,12 +2389,9 @@ export default function StructuredPricer() {
                     caption="Malz smile · each product priced at σ(strike)">
                     <Num v={bf25} set={setBF25} step="0.05" /></Row>
                 </>)}
-                {isMC ? (
-                  <Row name="MC Paths"><Num v={nPaths} set={setNPaths} step="1000" min="2000" /></Row>
-                ) : (
-                  <Row name="Engine">
-                    <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                      color: C.mute }}>Closed form Garman Kohlhagen</div>
+                {(isMC || product === "SHARK") && (
+                  <Row name="MC Paths" caption={`${fmt(Math.max(0, Math.round(+nPaths || 0)), 0)} simulated paths, antithetic`}>
+                    <NotionalInput v={nPaths} set={setNPaths} />
                   </Row>
                 )}
               </div>
@@ -1988,7 +2417,7 @@ export default function StructuredPricer() {
                       color: C.blue, fontWeight: 600 }}>{fmtDate(maturity)}</div>
                   </Row>
                 </>)}
-                {product === "DCD" && (<>
+                {(product === "DCD" || product === "SHARK") && (<>
                   <Row name="Deposit Term">
                     <Sel v={dcdTerm} set={setDcdTerm} opts={["2W", "1M", "2M", "3M", "6M", "12M"]} /></Row>
                   <Row name="Day Count" caption="deposit interest accrual">
@@ -2029,17 +2458,27 @@ export default function StructuredPricer() {
 
   /* ————————————————— PAGE 2 : RESULTS ————————————————— */
   const greekCards = res ? [
-    { id: "delta", name: "Delta", unit: res.base + " equivalent", color: C.blue, val: fmtBigSigned(res.delta) },
+    res.kind === "VAN"
+      ? { id: "delta", name: "Delta", unit: fmtBigSigned(res.delta) + " " + res.base + " equivalent",
+          color: C.blue, val: fmtSigned(res.delta / res.eurN, 4) }
+      : { id: "delta", name: "Delta", unit: res.base + " equivalent", color: C.blue, val: fmtBigSigned(res.delta) },
     { id: "delta", name: "Delta %", unit: "of " + res.base + " notional", color: C.text, val: fmtSigned(res.deltaPct, 1) + "%" },
-    { id: "gamma", name: "Gamma", unit: "Δdelta per 1 figure", color: C.text, val: fmtBigSigned(res.gammaFig) },
+    res.kind === "VAN"
+      ? { id: "gamma", name: "Gamma", unit: fmtBigSigned(res.gammaPip) + " " + res.base + " cash per pip",
+          color: C.text, val: fmtSigned(res.gammaPip / res.eurN, 5) }
+      : { id: "gamma", name: "Gamma", unit: "Δdelta per 1 pip", color: C.text, val: fmtBigSigned(res.gammaPip) },
     { id: "vega", name: "Vega", unit: res.base + " per 1 vol pt", color: C.blue, val: fmtBigSigned(res.vega / res.S0) },
     { id: "theta", name: "Theta", unit: res.base + " per day", color: C.text, val: fmtBigSigned(res.theta / res.S0) },
     { id: "rho", name: "Rho " + res.quote + " / " + res.base, unit: res.base + " per 1 bp", color: C.text,
       val: `${fmtBigSigned(res.rhoUSD / res.S0)} / ${fmtBigSigned(res.rhoEUR / res.S0)}` },
   ] : [];
   const greekMeta = {
-    delta: { title: "Delta vs spot", unit: res.base + " equivalent", keys: [["v", C.blue, "Delta"]] },
-    gamma: { title: "Gamma vs spot", unit: "Δdelta per 1 figure", keys: [["v", C.amber, "Gamma"]] },
+    delta: { title: "Delta vs spot",
+      unit: res && res.kind === "VAN" ? "unitless, from (1.00) to 1.00" : res.base + " equivalent",
+      keys: [["v", C.blue, "Delta"]] },
+    gamma: { title: "Gamma vs spot",
+      unit: res && res.kind === "VAN" ? "Δdelta per 1 pip, per unit of notional" : "Δdelta per 1 pip",
+      keys: [["v", C.amber, "Gamma"]] },
     vega:  { title: "Vega vs spot", unit: res.base + " per 1 vol pt", keys: [["v", C.blue, "Vega"]] },
     theta: { title: "Theta vs spot", unit: res.base + " per day", keys: [["v", C.amber, "Theta"]] },
     rho:   { title: "Rho vs spot", unit: res.base + " per 1 bp",
@@ -2061,16 +2500,11 @@ export default function StructuredPricer() {
           <div style={{ fontSize: 20, fontWeight: 800 }}>
             {res ? res.name : (product === "DCD" ? "Dual Currency Deposit"
               : product === "ACCU" ? "Accumulator"
-              : product === "VAN" ? "Vanilla Option" : tarfName)}{" "}
+              : product === "VAN" ? "Vanilla Option"
+              : product === "SHARK" ? "Sharkfin Note" : tarfName)}{" "}
             <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #8B7EDB)",
               WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Pricing</span>
           </div>
-          {res && (
-            <div style={{ fontSize: 11.5, color: C.faint, fontFamily: mono }}>
-              σ {fmt(res.sigUsed, 2)}%{res.volSmile ? " · smile at strike" : ""}
-              {res.kind === "VAN" || res.kind === "DCD" ? " · closed form" : " · Monte Carlo"}
-            </div>
-          )}
           <button onClick={runPricing} disabled={busy} className="sp-btn"
             style={{ marginLeft: "auto",
               background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)", border: "none", color: "#fff",
@@ -2079,6 +2513,59 @@ export default function StructuredPricer() {
             {busy ? "Pricing…" : "Reprice"}
           </button>
         </div>
+
+        {res && res.kind === "SHARK" && (
+          <div style={{ ...card, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, marginBottom: 18, padding: 0 }}>
+            <div style={{ padding: "20px 22px" }}>
+              <div style={colHead}>Participation</div>
+              <div style={{ fontFamily: mono, fontSize: 30, marginTop: 6, color: C.green,
+                fontVariantNumeric: "tabular-nums" }}>
+                {fmt(res.partPct, 1)}<span style={{ fontSize: 16, color: C.mute }}>%</span>
+              </div>
+              <div style={{ fontSize: 11, color: res.shortBudget ? C.amber : C.faint, marginTop: 4 }}>
+                {res.shortBudget ? "interest budget short of the rebate cost" : "of " + res.base + " performance beyond the strike"}
+              </div>
+            </div>
+            <div style={{ padding: "20px 22px", borderLeft: `1px solid ${C.line}` }}>
+              <div style={colHead}>Max coupon</div>
+              <div style={{ fontFamily: mono, fontSize: 22, marginTop: 8, color: C.green }}>
+                +{fmt(res.maxCpnPct, 2)}%
+              </div>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 4, fontFamily: mono }}>
+                just before the barrier at {fmtRate(res.H)}</div>
+            </div>
+            <div style={{ padding: "20px 22px", borderLeft: `1px solid ${C.line}` }}>
+              <div style={colHead}>Knock out</div>
+              <div style={{ fontFamily: mono, fontSize: 22, marginTop: 8, color: C.amber }}>
+                {fmt(res.pKOPct, 1)}%
+              </div>
+              <div style={{ fontSize: 11, color: C.faint, marginTop: 4, fontFamily: mono }}>
+                P(KO) · rebate {fmt(res.rebPct, 2)}% if hit</div>
+            </div>
+          </div>
+        )}
+
+        {res && res.kind === "SHARK" && (
+          <div style={{ ...card, marginBottom: 18 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14 }}>Note economics</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
+              {[
+                ["Deposit", fmtBig(res.N) + " " + res.depCcy + " · " + res.term + " · " + res.expiry],
+                ["Interest budget", fmt(res.rDepPct, 2) + "% − " + fmt(res.margPct, 2) + "% margin = " + fmt(res.budPct, 2) + "% at maturity"],
+                ["Strike / Barrier", fmtRate(res.K) + " / " + fmtRate(res.H) + " · " + res.obs + " KO"],
+                ["Capital floor", "100% guaranteed" + (res.rebPct > 0 ? " + " + fmt(res.rebPct, 2) + "% rebate if KO" : "")],
+                ["Direction", res.om === 1 ? "Bullish " + res.base + " · call up & out" : "Bearish " + res.base + " · put down & out"],
+                ["Pricing", "Monte Carlo · " + fmt(res.nPathsUsed, 0) + " paths" + (res.obs === "American" ? " · bridge KO monitoring" : " · maturity fixing") + " · " + res.depCcy + " coupon exact"],
+              ].map(([k, v]) => (
+                <div key={k} style={{ background: C.card2, border: `1px solid ${C.line}`,
+                  borderRadius: 10, padding: "11px 14px" }}>
+                  <div style={colHead}>{k}</div>
+                  <div style={{ fontFamily: mono, fontSize: 13, marginTop: 6 }}>{v}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {res && res.kind === "VAN" && (
           <div style={{ ...card, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, marginBottom: 18, padding: 0 }}>
@@ -2177,7 +2664,7 @@ export default function StructuredPricer() {
           </div>
         )}
 
-        {(!res || (res.kind !== "DCD" && res.kind !== "VAN")) && (
+        {(!res || (res.kind !== "DCD" && res.kind !== "VAN" && res.kind !== "SHARK")) && (
         <div style={{ ...card, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0, marginBottom: 18, padding: 0 }}>
           <div style={{ padding: "20px 22px" }}>
             <div style={colHead}>PV (client side)</div>
@@ -2311,45 +2798,45 @@ export default function StructuredPricer() {
                     <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
                     <XAxis dataKey="s" type="number" domain={["dataMin", "dataMax"]}
                       tick={{ fill: C.mute, fontSize: 10, fontFamily: mono }}
-                      tickFormatter={v => v.toFixed(4)} stroke={C.line} />
+                      tickFormatter={v => v.toFixed(RATE_DEC)} stroke={C.line} />
                     <YAxis tick={{ fill: C.mute, fontSize: 10, fontFamily: mono }}
                       tickFormatter={tickFmt} stroke={C.line} width={56} />
                     <Tooltip contentStyle={{ background: C.card2, border: `1px solid ${C.line}`,
                         fontFamily: mono, fontSize: 12, borderRadius: 8 }}
-                      labelFormatter={v => "Spot " + (+v).toFixed(4)}
+                      labelFormatter={v => "Spot " + (+v).toFixed(RATE_DEC)}
                       formatter={(v, nm) => [fmt(v, 0), nm]} />
                     <ReferenceLine y={0} stroke={C.mute} strokeWidth={1} />
                     <ReferenceLine ifOverflow="extendDomain" x={res.S0} stroke={C.blue} strokeDasharray="4 3"
-                      label={{ value: "spot " + res.S0.toFixed(4), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top" }} />
+                      label={{ value: "Spot " + res.S0.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top" }} />
                     {!res.pivotOn && (
                       <ReferenceLine ifOverflow="extendDomain" x={res.K} stroke={C.amber} strokeDasharray="4 3"
-                        label={{ value: "K " + res.K.toFixed(4), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 12 }} />
+                        label={{ value: "K " + res.K.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                     )}
                     {res.pivotOn && (<>
                       <ReferenceLine ifOverflow="extendDomain" x={res.kLow} stroke={C.amber} strokeDasharray="4 3"
-                        label={{ value: "KL " + res.kLow.toFixed(4), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 12 }} />
+                        label={{ value: "KL " + res.kLow.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                       <ReferenceLine ifOverflow="extendDomain" x={res.pivotL} stroke={C.blue} strokeDasharray="4 3"
-                        label={{ value: "P " + res.pivotL.toFixed(4), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                        label={{ value: "P " + res.pivotL.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                       <ReferenceLine ifOverflow="extendDomain" x={res.kHigh} stroke={C.amber} strokeDasharray="4 3"
-                        label={{ value: "KH " + res.kHigh.toFixed(4), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 12 }} />
+                        label={{ value: "KH " + res.kHigh.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                     </>)}
                     {res.lkoOn && (
                       <ReferenceLine ifOverflow="extendDomain" x={res.H} stroke={C.violet} strokeDasharray="4 3"
-                        label={{ value: "LKO " + res.H.toFixed(4), fill: C.violet, fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                        label={{ value: "LKO " + res.H.toFixed(RATE_DEC), fill: C.violet, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                     )}
                     {res.accOn && (
                       <ReferenceLine ifOverflow="extendDomain" x={res.koLevel} stroke={C.red} strokeDasharray="4 3"
-                        label={{ value: "KO " + res.koLevel.toFixed(4), fill: C.red, fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                        label={{ value: "KO " + res.koLevel.toFixed(RATE_DEC), fill: C.red, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                     )}
                     {res.ekiOn && (
                       <ReferenceLine ifOverflow="extendDomain" x={res.E} stroke="#C89A4B" strokeDasharray="4 3"
-                        label={{ value: "KI " + res.E.toFixed(4), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                        label={{ value: "KI " + res.E.toFixed(RATE_DEC), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                     )}
                     {res.pivotEkiOn && (<>
                       <ReferenceLine ifOverflow="extendDomain" x={res.eLow} stroke="#C89A4B" strokeDasharray="4 3"
-                        label={{ value: "KI " + res.eLow.toFixed(4), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                        label={{ value: "KI " + res.eLow.toFixed(RATE_DEC), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                       <ReferenceLine ifOverflow="extendDomain" x={res.eHigh} stroke="#C89A4B" strokeDasharray="4 3"
-                        label={{ value: "KI " + res.eHigh.toFixed(4), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                        label={{ value: "KI " + res.eHigh.toFixed(RATE_DEC), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                     </>)}
                     {greekMeta[selGreek].keys.map(([k, col, nm]) => (
                       <Line key={k} dataKey={k} name={nm} dot={false} stroke={col}
@@ -2368,9 +2855,10 @@ export default function StructuredPricer() {
               <span style={{ color: C.faint, fontWeight: 400, fontSize: 12.5 }}>
                 {res && res.kind === "DCD" ? " · final redemption at maturity"
                   : res && res.kind === "VAN" ? " · at expiry, net of premium"
+                  : res && res.kind === "SHARK" ? " · redemption at maturity, % of nominal"
                   : " · per fixing, client perspective"}</span>
             </div>
-            {res && res.kind !== "DCD" && res.kind !== "VAN" && !res.accOn && !res.countOn && <div style={{ fontFamily: mono, fontSize: 11.5, color: C.faint }}>
+            {res && res.kind !== "DCD" && res.kind !== "VAN" && res.kind !== "SHARK" && !res.accOn && !res.countOn && <div style={{ fontFamily: mono, fontSize: 11.5, color: C.faint }}>
               gain leg stops once {fmt(res.targetFig, 0)} figures accumulated
             </div>}
             {res && res.countOn && <div style={{ fontFamily: mono, fontSize: 11.5, color: C.faint }}>
@@ -2383,7 +2871,9 @@ export default function StructuredPricer() {
               {res.accStyle} KO at {fmtRate(res.koLevel)} · {res.payAtMat ? "ZC settlement" : "rolling settlement"}
             </div>}
           </div>
-          {res && res.kind === "VAN"
+          {res && res.kind === "SHARK"
+            ? <SharkfinDiagram res={res} C={C} mono={mono} sans={sans} />
+            : res && res.kind === "VAN"
             ? <VanillaDiagram res={res} C={C} mono={mono} sans={sans} />
             : res && res.kind === "DCD"
             ? <DCDDiagram res={res} C={C} mono={mono} sans={sans} />
@@ -2391,10 +2881,14 @@ export default function StructuredPricer() {
             ? <PivotPayoffDiagram res={res} C={C} mono={mono} sans={sans} />
             : <PayoffDiagram res={res} C={C} mono={mono} sans={sans} />}
           <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>
-            {res && res.kind === "VAN"
+            {res && res.kind === "SHARK"
+              ? `Capital is repaid at 100% everywhere. The fin: participation of ${fmt(res.partPct, 1)}% on the ${res.base} performance beyond the strike, growing until the barrier. ${res.obs === "European" ? "If the fixing at maturity is beyond the barrier" : "If spot touches the barrier at any time"}, the coupon is replaced by the ${fmt(res.rebPct, 2)}% rebate.`
+              : res && res.kind === "VAN"
               ? `Net position at expiry: intrinsic value ${res.side === "Buy" ? "minus the premium paid" : "minus intrinsic, plus the premium received"}. Breakeven is the strike ${res.type === "Call" ? "plus" : "minus"} the premium in ${res.quote} pips per ${res.base}.`
               : res && res.kind === "DCD"
               ? `Nominal redemption only, coupon excluded (the coupon of ${fmtBig(res.N * res.cpn)} ${res.depCcy} is paid regardless). Flat leg: nominal repaid in ${res.depCcy}. Sloped leg: the bank repays the alternative currency converted at the strike, so the ${res.depCcy} value of the nominal falls with the fixing. The amber marker is the breakeven including the coupon.`
+              : res && res.accelOn
+              ? `The gain leg is a curve, not a line: each favourable fixing trades at the improved strike (F = ${fmt(res.accelFA, 2)}), paying d + F × d² and filling the target quicker, which pulls the KO closer to the strike. The loss side is a standard ×${res.L} at the original strike.`
               : res && res.capLossOn
               ? `Two knock outs: the gain leg stops at the long target (KO marker) and the leveraged loss leg is bounded by the loss cap: once accumulated leveraged losses reach ${fmt(res.targetSFig, 0)} figures the trade terminates, flooring the per fixing loss at the dashed level (CAP marker).`
               : res && res.countOn
@@ -2437,45 +2931,45 @@ export default function StructuredPricer() {
                   <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
                   <XAxis dataKey="s" type="number" domain={["dataMin", "dataMax"]}
                     tick={{ fill: C.mute, fontSize: 10, fontFamily: mono }}
-                    tickFormatter={v => v.toFixed(4)} stroke={C.line} />
+                    tickFormatter={v => v.toFixed(RATE_DEC)} stroke={C.line} />
                   <YAxis tick={{ fill: C.mute, fontSize: 10, fontFamily: mono }}
                     tickFormatter={tickFmt} stroke={C.line} width={56} />
                   <Tooltip contentStyle={{ background: C.card2, border: `1px solid ${C.line}`,
                       fontFamily: mono, fontSize: 12, borderRadius: 8 }}
-                    labelFormatter={v => "Spot " + (+v).toFixed(4)}
+                    labelFormatter={v => "Spot " + (+v).toFixed(RATE_DEC)}
                     formatter={v => [fmt(v, 0) + " EUR", "PV"]} />
                   <ReferenceLine y={0} stroke={C.mute} strokeWidth={1} />
                   <ReferenceLine ifOverflow="extendDomain" x={res.S0} stroke={C.blue} strokeDasharray="4 3"
-                    label={{ value: "spot " + res.S0.toFixed(4), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top" }} />
+                    label={{ value: "Spot " + res.S0.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top" }} />
                   {!res.pivotOn && (
                     <ReferenceLine ifOverflow="extendDomain" x={res.K} stroke={C.amber} strokeDasharray="4 3"
-                      label={{ value: "K " + res.K.toFixed(4), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 12 }} />
+                      label={{ value: "K " + res.K.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                   )}
                   {res.pivotOn && (<>
                     <ReferenceLine ifOverflow="extendDomain" x={res.kLow} stroke={C.amber} strokeDasharray="4 3"
-                      label={{ value: "KL " + res.kLow.toFixed(4), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 12 }} />
+                      label={{ value: "KL " + res.kLow.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                     <ReferenceLine ifOverflow="extendDomain" x={res.pivotL} stroke={C.blue} strokeDasharray="4 3"
-                      label={{ value: "P " + res.pivotL.toFixed(4), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                      label={{ value: "P " + res.pivotL.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                     <ReferenceLine ifOverflow="extendDomain" x={res.kHigh} stroke={C.amber} strokeDasharray="4 3"
-                      label={{ value: "KH " + res.kHigh.toFixed(4), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 12 }} />
+                      label={{ value: "KH " + res.kHigh.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                   </>)}
                   {res.lkoOn && (
                     <ReferenceLine ifOverflow="extendDomain" x={res.H} stroke={C.violet} strokeDasharray="4 3"
-                      label={{ value: "LKO " + res.H.toFixed(4), fill: C.violet, fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                      label={{ value: "LKO " + res.H.toFixed(RATE_DEC), fill: C.violet, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                   )}
                   {res.accOn && (
                     <ReferenceLine ifOverflow="extendDomain" x={res.koLevel} stroke={C.red} strokeDasharray="4 3"
-                      label={{ value: "KO " + res.koLevel.toFixed(4), fill: C.red, fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                      label={{ value: "KO " + res.koLevel.toFixed(RATE_DEC), fill: C.red, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                   )}
                   {res.ekiOn && (
                     <ReferenceLine ifOverflow="extendDomain" x={res.E} stroke="#C89A4B" strokeDasharray="4 3"
-                      label={{ value: "KI " + res.E.toFixed(4), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                      label={{ value: "KI " + res.E.toFixed(RATE_DEC), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                   )}
                   {res.pivotEkiOn && (<>
                     <ReferenceLine ifOverflow="extendDomain" x={res.eLow} stroke="#C89A4B" strokeDasharray="4 3"
-                      label={{ value: "KI " + res.eLow.toFixed(4), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                      label={{ value: "KI " + res.eLow.toFixed(RATE_DEC), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                     <ReferenceLine ifOverflow="extendDomain" x={res.eHigh} stroke="#C89A4B" strokeDasharray="4 3"
-                      label={{ value: "KI " + res.eHigh.toFixed(4), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 24 }} />
+                      label={{ value: "KI " + res.eHigh.toFixed(RATE_DEC), fill: "#C89A4B", fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                   </>)}
                   <Line dataKey="v" dot={false} stroke="url(#pvSpotGrad)" strokeWidth={2.4} type="monotone" />
                 </ComposedChart>
@@ -2486,10 +2980,14 @@ export default function StructuredPricer() {
           <div style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>
             Forward to maturity: <span style={{ fontFamily: mono, color: C.text }}>
             {res ? fmtRate(res.fwd) : "…"}</span>.
-            {res && res.kind === "VAN"
+            {res && res.kind === "SHARK"
+              ? ` Value of the participation and rebate legs in ${res.base} (the guaranteed deposit is excluded): the classic sharkfin hump, rising with spot then collapsing toward the barrier where the coupon dies, negative gamma concentrated at the fin edge.`
+              : res && res.kind === "VAN"
               ? ` Mark to market of the position in ${res.base} before expiry: the smooth curve above the expiry hockey stick is time value, largest at the strike where gamma and vega ${res.side === "Buy" ? "peak" : "trough"}.`
               : res && res.kind === "DCD"
               ? ` Mark to market of the embedded short option in ${res.base} (the deposit leg itself is excluded): most negative where the option is deepest in the bank's favour, with vega concentrated near the strike.`
+              : res && res.accelOn
+              ? " Accelerated gains cut both ways: the upside per fixing is richer, but the target fills sooner so the trade dies earlier when spot runs favourably, while the leveraged downside is untouched: expected life drops and the KO probability rises versus the vanilla TARF."
               : res && res.capLossOn
               ? " The loss cap puts a floor under the downside: unlike the vanilla TARF whose PV dives linearly, here cumulative losses cannot exceed the cap, so the left tail of the profile flattens toward a bounded worst case."
               : res && res.countOn
