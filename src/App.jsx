@@ -340,21 +340,21 @@ const GLOBAL_CSS = `
 @keyframes spFade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .sp-fade { animation: spFade .4s cubic-bezier(.22,.8,.36,1); }
 .sp-input { transition: border-color .16s ease, box-shadow .16s ease, background .16s ease; }
-.sp-input:focus { border-color: #4A7DF0 !important; box-shadow: 0 0 0 3px rgba(74,125,240,.16); background: #1B2130 !important; }
+.sp-input:focus { border-color: #14A87D !important; box-shadow: 0 0 0 3px rgba(20,168,125,.16); background: #1B2130 !important; }
 select.sp-input option { background: #13161F; color: #E7EDF9; }
 .sp-click { transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease; }
-.sp-click:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(0,0,0,.45); border-color: rgba(74,125,240,.55) !important; }
+.sp-click:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(0,0,0,.45); border-color: rgba(20,168,125,.55) !important; }
 .sp-btn { transition: filter .15s ease, transform .15s ease, box-shadow .15s ease; }
 .sp-btn:hover:not(:disabled) { filter: brightness(1.12); transform: translateY(-1px); }
 .sp-btn:active:not(:disabled) { transform: translateY(0); filter: brightness(.98); }
 .sp-row { transition: background .12s ease; }
-.sp-row:hover { background: rgba(74,125,240,.07); }
+.sp-row:hover { background: rgba(20,168,125,.07); }
 .sp-scroll { scrollbar-width: thin; scrollbar-color: #2A3140 transparent; }
 .sp-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
 .sp-scroll::-webkit-scrollbar-thumb { background: #2A3140; border-radius: 8px; }
 .sp-scroll::-webkit-scrollbar-thumb:hover { background: #39424F; }
 .sp-scroll::-webkit-scrollbar-track { background: transparent; }
-::selection { background: rgba(74,125,240,.35); }
+::selection { background: rgba(20,168,125,.35); }
 `;
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const fmtDate = d => d ? `${String(d.getDate()).padStart(2,"0")} ${MONTHS[d.getMonth()]} ${d.getFullYear()}` : "…";
@@ -534,7 +534,7 @@ function PayoffDiagram({ res, C, mono, sans }) {
         <text x={X(E)} y={Y0 + 62} textAnchor="middle" fontFamily={sans} fontSize="9.5" fontWeight="700" fill="#C89A4B">Barrier</text>
         <text x={X(E)} y={Y0 + 76} textAnchor="middle" fontFamily={mono} fontSize="10.5" fill={C.text}>{fmtRate(E)}</text>
       </g>)}
-      <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
+      <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.jade} strokeWidth="2" />
       {(() => {
         const below = pay(S0) > 0;
         let sx = X(S0), anchor = "middle";
@@ -546,7 +546,7 @@ function PayoffDiagram({ res, C, mono, sans }) {
         }
         return (
           <text x={sx} y={below ? Y0 + 18 : Y0 - 10} textAnchor={anchor}
-            fontFamily={mono} fontSize="10" fill={C.blue}>
+            fontFamily={mono} fontSize="10" fill={C.jade}>
             Spot {fmtRate(S0)}
           </text>
         );
@@ -656,7 +656,7 @@ function VanillaDiagram({ res, C, mono, sans }) {
         Breakeven {fmtRate(breakeven)}
       </text>
       {/* spot */}
-      <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
+      <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.jade} strokeWidth="2" />
       {(() => {
         const below = net(S0) > 0;
         let sx = X(S0), anchor = "middle";
@@ -666,7 +666,7 @@ function VanillaDiagram({ res, C, mono, sans }) {
         }
         return (
           <text x={sx} y={below ? Y0 + 18 : Y0 - 10} textAnchor={anchor}
-            fontFamily={mono} fontSize="10" fill={C.blue}>
+            fontFamily={mono} fontSize="10" fill={C.jade}>
             Spot {fmtRate(S0)}
           </text>
         );
@@ -749,14 +749,14 @@ function SharkfinDiagram({ res, C, mono, sans }) {
         <text x={X(H)} y={HH - mB + 76} textAnchor="middle" fontFamily={mono} fontSize="10.5" fill={C.text}>{fmtRate(H)}</text>
       </g>
       {/* spot */}
-      <circle cx={X(S0)} cy={HH - mB} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
+      <circle cx={X(S0)} cy={HH - mB} r="5" fill="none" stroke={C.jade} strokeWidth="2" />
       {(() => {
         let sx = X(S0), anchor = "middle";
         const stems = [X(K), X(H)];
         const near = stems.find(tx => Math.abs(tx - sx) < 48);
         if (near !== undefined) { anchor = sx >= near ? "start" : "end"; sx = near + (sx >= near ? 24 : -24); }
         return (
-          <text x={sx} y={HH - mB - 10} textAnchor={anchor} fontFamily={mono} fontSize="10" fill={C.blue}>
+          <text x={sx} y={HH - mB - 10} textAnchor={anchor} fontFamily={mono} fontSize="10" fill={C.jade}>
             Spot {fmtRate(S0)}
           </text>
         );
@@ -840,7 +840,7 @@ function DCDDiagram({ res, C, mono, sans }) {
         Breakeven incl. coupon {fmtRate(breakeven)}
       </text>
       {/* spot */}
-      <circle cx={X(S0)} cy={Ybase} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
+      <circle cx={X(S0)} cy={Ybase} r="5" fill="none" stroke={C.jade} strokeWidth="2" />
       {(() => {
         let sx = X(S0), anchor = "middle";
         if (Math.abs(X(breakeven) - sx) < 42) {
@@ -849,7 +849,7 @@ function DCDDiagram({ res, C, mono, sans }) {
         }
         return (
           <text x={sx} y={Ybase - 10} textAnchor={anchor}
-            fontFamily={mono} fontSize="10" fill={C.blue}>
+            fontFamily={mono} fontSize="10" fill={C.jade}>
             Spot {fmtRate(S0)}
           </text>
         );
@@ -997,8 +997,8 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
       {blackTag(kL, "KL", kL)}
       {blackTag(kH, "KH", kH)}
       <g>
-        <line x1={X(P)} y1={Y0} x2={X(P)} y2={Y0 + 48} stroke={C.blue} strokeDasharray="3 3" strokeWidth="1" />
-        <rect x={X(P) - 27} y={Y0 + 48} width={54} height={20} rx="10" fill={C.blue} />
+        <line x1={X(P)} y1={Y0} x2={X(P)} y2={Y0 + 48} stroke={C.jade} strokeDasharray="3 3" strokeWidth="1" />
+        <rect x={X(P) - 27} y={Y0 + 48} width={54} height={20} rx="10" fill={C.jade} />
         <text x={X(P)} y={Y0 + 62} textAnchor="middle" fontFamily={mono} fontSize="10" fontWeight="700" fill="#FFFFFF">PIVOT</text>
         <text x={X(P)} y={Y0 + 82} textAnchor="middle" fontFamily={mono} fontSize="10.5" fill={C.text}>{fmtRate(P)}</text>
       </g>
@@ -1018,7 +1018,7 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
           fontSize="9.5" fontWeight="700" fill={C.green}>Participation</text>
       </g>)}
       {/* spot */}
-      <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.blue} strokeWidth="2" />
+      <circle cx={X(S0)} cy={Y0} r="5" fill="none" stroke={C.jade} strokeWidth="2" />
       {(() => {
         let sx = X(S0), anchor = "middle";
         const legs = [X(kL), X(kH)];
@@ -1026,7 +1026,7 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
         if (near !== undefined) { anchor = sx >= near ? "start" : "end"; sx = near + (sx >= near ? 20 : -20); }
         return (
           <text x={sx} y={Y0 - 12} textAnchor={anchor}
-            fontFamily={mono} fontSize="10" fill={C.blue}>
+            fontFamily={mono} fontSize="10" fill={C.jade}>
             Spot {fmtRate(S0)}
           </text>
         );
@@ -1065,11 +1065,11 @@ function PivotPayoffDiagram({ res, C, mono, sans }) {
 
 // ---------- design tokens & shared inputs (module scope so fields keep focus) ----------
 const C = {
-    bg: "radial-gradient(1000px 540px at 75% -10%, rgba(96,118,168,0.10), transparent 62%), #0A0C11",
+    bg: "radial-gradient(1000px 540px at 75% -10%, rgba(34,164,124,0.09), transparent 62%), #0A0C11",
     card: "linear-gradient(180deg, #13161F 0%, #0F1218 100%)", card2: "#171B26", line: "#242A38",
     inp: "#161A24", inpLine: "#2A3140",
     text: "#E8EAEE", mute: "#98A1B3", faint: "#646E82",
-    blue: "#4A7DF0", amber: "#D9A441", green: "#2FBF8F", red: "#E5484D", violet: "#8B7EDB",
+    jade: "#14A87D", amber: "#D9A441", green: "#2FBF8F", red: "#E5484D", violet: "#8B7EDB",
   };
 const mono = "'SF Mono', ui-monospace, 'Cascadia Code', Consolas, 'Roboto Mono', Menlo, monospace";
 const sans = "'Inter', 'Inter UI', -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
@@ -1145,34 +1145,45 @@ const Field = ({ name, children, hint }) => (
   );
 
 
-// ---------- Ratex brand: glyph, nav pill, site header ----------
+// ---------- Tsuki brand: crescent-moon glyph, nav pill, site header ----------
 const Glyph = ({ size = 30 }) => (
-  <div style={{ width: size, height: size, borderRadius: size * 0.3, transform: "rotate(45deg)",
-    background: "linear-gradient(135deg, #4A7DF0, #6E8EF7)",
-    boxShadow: "0 4px 16px rgba(74,125,240,0.45)", flexShrink: 0,
-    display: "flex", alignItems: "center", justifyContent: "center" }}>
-    <div style={{ width: size * 0.33, height: size * 0.33, borderRadius: size * 0.1,
-      background: "rgba(255,255,255,0.9)" }} />
-  </div>
+  <svg width={size} height={size} viewBox="0 0 40 40" fill="none"
+    style={{ flexShrink: 0, filter: "drop-shadow(0 4px 14px rgba(20,168,125,0.45))" }}>
+    <defs>
+      <linearGradient id="tsukiJade" x1="6" y1="4" x2="34" y2="38" gradientUnits="userSpaceOnUse">
+        <stop stopColor="#3EDDA8" />
+        <stop offset="1" stopColor="#0C7E5E" />
+      </linearGradient>
+      <mask id="tsukiCrescent">
+        <circle cx="20" cy="20" r="17" fill="#fff" />
+        <circle cx="27.5" cy="13.5" r="14" fill="#000" />
+      </mask>
+    </defs>
+    <circle cx="20" cy="20" r="17" fill="url(#tsukiJade)" mask="url(#tsukiCrescent)" />
+    <circle cx="29" cy="9" r="1.7" fill="#3EDDA8" />
+  </svg>
 );
 const Wordmark = ({ size = 21 }) => (
-  <span style={{ fontSize: size, fontWeight: 800, letterSpacing: "-0.02em", color: C.text, fontFamily: sans }}>
-    Ra<span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #6E8EF7)",
-      WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>tex</span>
+  <span style={{ fontSize: size, fontWeight: 700, letterSpacing: "0.05em", color: C.text, fontFamily: sans }}>
+    Tsu<span style={{ backgroundImage: "linear-gradient(90deg, #14A87D, #3EDDA8)",
+      WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>ki</span>
   </span>
 );
 const NavPill = ({ active, onNav }) => (
-  <div style={{ display: "flex", gap: 4, background: "rgba(23,27,38,0.85)",
-    border: `1px solid ${C.line}`, borderRadius: 999, padding: 5 }}>
-    {[["home", "Home"], ["fx", "FX"], ["rates", "Rates"]].map(([id, lab]) => {
+  <div style={{ display: "flex", gap: 6, background: "rgba(255,255,255,0.035)",
+    border: `1px solid ${C.line}`, borderRadius: 18, padding: 8,
+    backdropFilter: "blur(10px)", boxShadow: "0 12px 40px rgba(0,0,0,0.28)" }}>
+    {[["home", "Home"], ["fx", "FX"], ["rates", "Rates"], ["equity", "Equity"]].map(([id, lab]) => {
       const on = active === id;
       return (
         <div key={id} onClick={() => onNav(id)} className="sp-btn"
-          style={{ padding: "7px 22px", borderRadius: 999, cursor: "pointer",
-            fontSize: 13.5, fontWeight: 600, fontFamily: sans, userSelect: "none",
+          style={{ padding: "12px 30px", borderRadius: 12, cursor: "pointer",
+            fontSize: 16, fontWeight: 650, fontFamily: sans, userSelect: "none",
+            letterSpacing: "0.01em",
             color: on ? "#fff" : C.mute,
-            background: on ? "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)" : "transparent",
-            boxShadow: on ? "0 4px 14px rgba(74,125,240,0.35)" : "none" }}>
+            background: on ? "linear-gradient(135deg, #0C7E5E 0%, #21C495 140%)" : "transparent",
+            boxShadow: on ? "0 6px 20px rgba(12,126,94,0.45)" : "none",
+            transition: "color 0.15s" }}>
           {lab}
         </div>
       );
@@ -1180,17 +1191,22 @@ const NavPill = ({ active, onNav }) => (
   </div>
 );
 const SiteHeader = ({ active, onNav }) => (
-  <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 26,
-    paddingBottom: 16, borderBottom: `1px solid ${C.line}` }}>
+  <div style={{ position: "relative", display: "flex", alignItems: "center",
+    minHeight: 86, marginBottom: 26, paddingBottom: 16, borderBottom: `1px solid ${C.line}` }}>
     <div onClick={() => onNav("home")}
-      style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
-      <Glyph />
-      <Wordmark />
+      style={{ display: "flex", alignItems: "center", gap: 13, cursor: "pointer", zIndex: 2 }}>
+      <Glyph size={34} />
+      <div>
+        <Wordmark />
+        <div style={{ fontSize: 8.5, color: C.faint, letterSpacing: "0.24em",
+          textTransform: "uppercase", marginTop: 3, fontWeight: 600 }}>
+          FX & Rates Structured Products
+        </div>
+      </div>
     </div>
-    <span style={{ fontSize: 11.5, color: C.faint, letterSpacing: "0.06em", marginTop: 3 }}>
-      FX & Rates Structured Products
-    </span>
-    <div style={{ marginLeft: "auto" }}><NavPill active={active} onNav={onNav} /></div>
+    <div style={{ position: "absolute", left: "50%", transform: "translateX(-50%)" }}>
+      <NavPill active={active} onNav={onNav} />
+    </div>
   </div>
 );
 
@@ -1250,10 +1266,12 @@ export default function StructuredPricer() {
   const [accelFA, setAccelFA] = useState(2.00);
   const [sharkDir, setSharkDir] = useState("Bullish");
   const [sharkStrike, setSharkStrike] = useState(1.0850);
-  const [sharkBar, setSharkBar] = useState(1.1350);
+  const [sharkBar, setSharkBar] = useState(1.2050);
   const [sharkObs, setSharkObs] = useState("American");
   const [sharkRebate, setSharkRebate] = useState(0.50);
   const [sharkMargin, setSharkMargin] = useState(0.20);
+  const [sharkPayCcy, setSharkPayCcy] = useState("USD");
+  const [sharkQConv, setSharkQConv] = useState("Strike K");
   const [koConv, setKoConv] = useState("full");
   const [payTiming, setPayTiming] = useState("Rolling");
   const [accKO, setAccKO] = useState(1.1200);
@@ -1321,6 +1339,7 @@ export default function StructuredPricer() {
   const nav = id => {
     if (id === "home") setPage("home");
     else if (id === "fx") setPage("products");
+    else if (id === "equity") setPage("equity");
     else setPage("rates");
   };
 
@@ -1341,7 +1360,8 @@ export default function StructuredPricer() {
     setDcdStrike(rnd(s));
     setVanStrike(rnd(s));
     setSharkStrike(rnd(s));
-    setSharkBar(rnd(s + 0.0500 * F));
+    setSharkBar(rnd(s + 0.1200 * F));
+    setSharkPayCcy(cfg.quote); // ~2.6 sigma at default vol: textbook regime, vega and gamma positive at spot
   }, []);
 
   const changePair = np => {
@@ -1497,12 +1517,14 @@ export default function StructuredPricer() {
           const rhoEUR = (posUSD(S0v, sig, rd, rf + hR) - posUSD(S0v, sig, rd, rf - hR)) / (2 * hR) * 0.0001;
           const dom = axisDomain([Kv, breakeven], S0v);
           const NS = 25, sLo = dom.lo, sHi = dom.hi;
-          const prof = { delta: [], gamma: [], vega: [], theta: [], rho: [], pv: [] };
+          const prof = { delta: [], deltaU: [], gamma: [], vega: [], theta: [], rho: [], pv: [] };
           for (let i = 0; i < NS; i++) {
             const s = +(sLo + ((sHi - sLo) * i) / (NS - 1)).toFixed(4);
             prof.pv.push({ s, v: posUSD(s) * cv0 });
-            prof.delta.push({ s, v: (posUSD(s + hS) - posUSD(s - hS)) / (2 * hS) / eurN });
-            prof.gamma.push({ s, v: (posUSD(s + hG) - 2 * posUSD(s) + posUSD(s - hG)) / (hG * hG) * PC.pip / eurN });
+            const dCash = (posUSD(s + hS) - posUSD(s - hS)) / (2 * hS);
+            prof.delta.push({ s, v: dCash });
+            prof.deltaU.push({ s, v: dCash / eurN });
+            prof.gamma.push({ s, v: (posUSD(s + hG) - 2 * posUSD(s) + posUSD(s - hG)) / (hG * hG) * PC.pip });
             prof.vega.push({ s, v: (posUSD(s, sig + hV) - posUSD(s, sig - hV)) / (2 * hV) * 0.01 * cv0 });
             prof.theta.push({ s, v: (posUSD(s, sig, rd, rf, Math.max(T - 1 / 365, 1e-6)) - posUSD(s)) * cv0 });
             prof.rho.push({ s, vUSD: (posUSD(s, sig, rd + hR) - posUSD(s, sig, rd - hR)) / (2 * hR) * 0.0001 * cv0,
@@ -1560,7 +1582,8 @@ export default function StructuredPricer() {
             let ePerf = 0, ePerfS = 0, eKO = 0, eKOS = 0;
             for (let pth = 0; pth < np; pth++) {
               const base = pth * nSt;
-              let x = S0x, dead = false;
+              // American KO: starting at or beyond the barrier means the option is already dead
+              let x = S0x, dead = amerS && (omS === 1 ? S0x >= Hs : S0x <= Hs);
               for (let i = 0; i < nSt; i++) {
                 const xp = x;
                 x = x * Math.exp(drift + vs * zS[base + i]);
@@ -1584,20 +1607,33 @@ export default function StructuredPricer() {
           };
 
           const base0 = runShark();
-          const Ffwd = S0s * Math.exp((rd - rf) * T);
-          // participation solved from the budget in the DEPOSIT currency measure (exact, incl. quanto)
-          const EperfDep = depIsBase ? base0.ePerfS / Ffwd : base0.ePerf;
-          const pKODep = depIsBase ? base0.eKOS / Ffwd : base0.pKO;
-          const partRaw = EperfDep > 1e-12 ? (bud - reb * pKODep) / EperfDep : 0;
+          const payBase = sharkPayCcy === BASE;
+          // Quanto conventions (Clark 10.3, Trading School FX): the natural payoff O = max(ω(S−K),0) is a
+          // QUOTE amount. Settled in BASE it is divided by a conversion rate: S_T (fair conversion, no
+          // adjustment), K (standard self quanto), or today's spot. Engine tracks E[O/K·alive] (ePerf)
+          // and E[O/K·S_T·alive] (ePerfS): every convention is exact from these two moments.
+          const perfMoment = m =>
+            !payBase ? m.ePerf                                 // rate O/K paid in QUOTE
+            : sharkQConv === "Spot at expiry" ? Ks * m.ePerf   // rate O/S_T in BASE: E[(O/S_T)·S_T] = E[O]
+            : sharkQConv === "Spot at T0" ? m.ePerfS * Ks / S0s // rate O/S0 in BASE
+            : m.ePerfS;                                        // rate O/K in BASE: self quanto
+          const rebMoment = m => payBase ? m.eKOS : m.pKO;     // rebate settled in the payout ccy
+          // budget: certain deposit-ccy cash at maturity, valued in QUOTE
+          const budPVq = bud * (depIsBase ? Math.exp(-rf * T) * S0s : Math.exp(-rd * T));
+          const dfq = Math.exp(-rd * T);
+          const perfPVq = dfq * perfMoment(base0);
+          const rebPVq = dfq * reb * rebMoment(base0);
+          const partRaw = perfPVq > 1e-14 ? (budPVq - rebPVq) / perfPVq : 0;
           const part = Math.max(partRaw, 0);
-          const maxCpn = part * omS * (Hs - Ks) / Ks;
+          const cpnDiv = !payBase ? Ks
+            : sharkQConv === "Spot at expiry" ? Hs
+            : sharkQConv === "Spot at T0" ? S0s : Ks;
+          const maxCpn = part * omS * (Hs - Ks) / cpnDiv;
           const pKO = base0.pKO;
 
           // package value in QUOTE (participation + rebate legs), participation fixed at the solve
           const pkgQuote = (m, rdd = rd, TT = T) =>
-            Nn * Math.exp(-rdd * TT) * (depIsBase
-              ? part * m.ePerfS + reb * m.eKOS
-              : part * m.ePerf + reb * m.pKO);
+            Nn * Math.exp(-rdd * TT) * (part * perfMoment(m) + reb * rebMoment(m));
           const posQuote = (o = {}, np = NP2) =>
             pkgQuote(runShark(o, np), o.rd !== undefined ? o.rd : rd, o.T !== undefined ? o.T : T);
 
@@ -1628,12 +1664,27 @@ export default function StructuredPricer() {
                                vEUR: (posQuote({ S0: s, rf: rf + hR }, npLad) - posQuote({ S0: s, rf: rf - hR }, npLad)) / (2 * hR) * 0.0001 * cv0 });
           }
           prof.gamma = smoothProf(smoothProf(prof.gamma));
+          // vega at fixed spot across volatility levels, from exactly sigma = 0
+          // (at zero vol the path is deterministic: no uncertainty, vega must come out 0 — a built-in engine check)
+          {
+            const sgHi = Math.max(0.22, sig * 2.4), NV = 25;
+            const vv = [];
+            for (let i = 0; i < NV; i++) {
+              const sg = (sgHi * i) / (NV - 1); // grid starts at 0
+              const lo = Math.max(sg - hV, 0), hi = sg + hV;
+              vv.push({ sg: +(sg * 100).toFixed(2),
+                v: (posQuote({ sig: hi }, npLad) - posQuote({ sig: lo }, npLad)) / (hi - lo) * 0.01 * cv0 });
+            }
+            prof.vegaVol = smoothProf(vv);
+          }
           setRes({
             kind: "SHARK", name: "Sharkfin Note · " + (omS === 1 ? "Bullish " + BASE : "Bearish " + BASE),
             pair, base: BASE, quote: QUOTE, axLo: dom.lo, axHi: dom.hi,
             sigUsed: sig * 100, volSmile: volMode !== "Flat",
             S0: S0s, K: Ks, H: Hs, om: omS, obs: sharkObs, depCcy, N: Nn, T,
             expiry: fmtDate(mDate), term: dcdTerm,
+            payCcy: payBase ? BASE : QUOTE, qConv: sharkQConv,
+            selfQuanto: payBase && sharkQConv !== "Spot at expiry",
             partPct: part * 100, maxCpnPct: maxCpn * 100, pKOPct: pKO * 100,
             rebPct: reb * 100, budPct: bud * 100, rDepPct: rDep * 100, margPct: marg * 100,
             nPathsUsed: NP2, nStepsUsed: nSt,
@@ -1681,7 +1732,7 @@ export default function StructuredPricer() {
           const rhoUSD = (posUSD(S0d, sig, rd + hR) - posUSD(S0d, sig, rd - hR)) / (2 * hR) * 0.0001;
           const rhoEUR = (posUSD(S0d, sig, rd, rf + hR) - posUSD(S0d, sig, rd, rf - hR)) / (2 * hR) * 0.0001;
           const eurEquivN = depCcy === BASE ? Nd : Nd / Kd;
-          const dom = axisDomain([Kd, bev], S0d);
+          const dom = axisDomain([Kd, breakeven], S0d);
           const NS = 25, sLo = dom.lo, sHi = dom.hi;
           const prof = { delta: [], gamma: [], vega: [], theta: [], rho: [], pv: [] };
           for (let i = 0; i < NS; i++) {
@@ -1888,7 +1939,7 @@ export default function StructuredPricer() {
       product, depCcy, dcdStrike, dcdTerm, dcdMargin, dcdDayCount, payTiming, accKO, accKoStyle,
       vanType, vanSide, vanStrike, vanTerm, isCount, countTarget, volMode, rr25, bf25,
       isCapLoss, civLoss, koConvS, isAccel, accelFA, pair, BASE, QUOTE, PC,
-      sharkDir, sharkStrike, sharkBar, sharkObs, sharkRebate, sharkMargin]);
+      sharkDir, sharkStrike, sharkBar, sharkObs, sharkRebate, sharkMargin, sharkPayCcy, sharkQConv]);
 
   const products = [
     { id: "TARF", name: "TARF", desc: "Target redemption forward family: strip of leveraged forwards knocked out on accumulated gains", ready: true },
@@ -1920,25 +1971,35 @@ export default function StructuredPricer() {
           <SiteHeader active="home" onNav={nav} />
           <div style={{ minHeight: "62vh", display: "flex", flexDirection: "column",
             alignItems: "center", justifyContent: "center", textAlign: "center" }}>
-            <Glyph size={58} />
-            <div style={{ marginTop: 30 }}><Wordmark size={58} /></div>
-            <div style={{ marginTop: 18, fontSize: 19, color: C.mute, maxWidth: 620, lineHeight: 1.6 }}>
-              Price FX & Rates structured products: TARFs, accumulators, dual currency deposits
-              and options, with Monte Carlo Greeks, payoff diagrams and live market data.
+            <Glyph size={62} />
+            <div style={{ marginTop: 30 }}><Wordmark size={62} /></div>
+            <div style={{ marginTop: 16, fontSize: 13.5, color: C.mute, letterSpacing: "0.34em",
+              textTransform: "uppercase", fontWeight: 600 }}>
+              FX & Rates Structured Products
             </div>
-            <div style={{ display: "flex", gap: 16, marginTop: 44, flexWrap: "wrap", justifyContent: "center" }}>
+            <div style={{ marginTop: 26, fontSize: 18.5, color: C.mute, maxWidth: 640, lineHeight: 1.65 }}>
+              Price TARFs, accumulators, dual currency deposits, sharkfin notes and options,
+              with Monte Carlo Greeks, payoff diagrams and live market data.
+            </div>
+            <div style={{ display: "flex", gap: 16, marginTop: 48, flexWrap: "wrap", justifyContent: "center" }}>
               <button onClick={() => nav("fx")} className="sp-btn"
-                style={{ padding: "17px 44px", border: "none", borderRadius: 14, cursor: "pointer",
-                  background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)", color: "#fff",
-                  fontFamily: sans, fontSize: 16.5, fontWeight: 700,
-                  boxShadow: "0 10px 34px rgba(74,125,240,0.40)" }}>
+                style={{ padding: "18px 46px", border: "none", borderRadius: 14, cursor: "pointer",
+                  background: "linear-gradient(135deg, #0C7E5E 0%, #21C495 140%)", color: "#fff",
+                  fontFamily: sans, fontSize: 17, fontWeight: 700,
+                  boxShadow: "0 12px 38px rgba(12,126,94,0.45)" }}>
                 FX Structured Products →
               </button>
               <button onClick={() => nav("rates")} className="sp-btn"
-                style={{ padding: "17px 44px", borderRadius: 14, cursor: "pointer",
-                  background: "transparent", border: `1.5px solid ${C.line}`, color: C.text,
-                  fontFamily: sans, fontSize: 16.5, fontWeight: 700 }}>
-                Rates Structured Products
+                style={{ padding: "18px 46px", borderRadius: 14, cursor: "pointer",
+                  background: "rgba(255,255,255,0.03)", border: `1.5px solid ${C.line}`, color: C.text,
+                  fontFamily: sans, fontSize: 17, fontWeight: 700 }}>
+                Rates
+              </button>
+              <button onClick={() => nav("equity")} className="sp-btn"
+                style={{ padding: "18px 46px", borderRadius: 14, cursor: "pointer",
+                  background: "rgba(255,255,255,0.03)", border: `1.5px solid ${C.line}`, color: C.text,
+                  fontFamily: sans, fontSize: 17, fontWeight: 700 }}>
+                Equity
               </button>
             </div>
           </div>
@@ -1956,7 +2017,7 @@ export default function StructuredPricer() {
           <SiteHeader active="rates" onNav={nav} />
           <div style={{ ...card, maxWidth: 640, margin: "12vh auto 0", textAlign: "center", padding: 44 }}>
             <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>
-              Rates <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #6E8EF7)",
+              Rates <span style={{ backgroundImage: "linear-gradient(90deg, #14A87D, #3EDDA8)",
                 WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Structured Products</span>
             </div>
             <div style={{ marginTop: 16, fontSize: 14.5, color: C.mute, lineHeight: 1.65 }}>
@@ -1966,9 +2027,38 @@ export default function StructuredPricer() {
             </div>
             <button onClick={() => nav("fx")} className="sp-btn"
               style={{ marginTop: 30, padding: "13px 34px", border: "none", borderRadius: 12,
-                cursor: "pointer", background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)",
+                cursor: "pointer", background: "linear-gradient(135deg, #14A87D 0%, #3EDDA8 140%)",
                 color: "#fff", fontFamily: sans, fontSize: 14.5, fontWeight: 700,
-                boxShadow: "0 8px 26px rgba(74,125,240,0.35)" }}>
+                boxShadow: "0 8px 26px rgba(20,168,125,0.35)" }}>
+              Go to FX Structured Products →
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ————————————————— EQUITY (placeholder) ————————————————— */
+  if (page === "equity") {
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: sans, padding: "28px 24px 60px" }}>
+        <style>{GLOBAL_CSS}</style>
+        <div className="sp-fade" style={{ maxWidth: 1180, margin: "0 auto" }}>
+          <SiteHeader active="equity" onNav={nav} />
+          <div style={{ ...card, maxWidth: 640, margin: "12vh auto 0", textAlign: "center", padding: 44 }}>
+            <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: "-0.02em" }}>
+              Equity <span style={{ backgroundImage: "linear-gradient(90deg, #14A87D, #3EDDA8)",
+                WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Structured Products</span>
+            </div>
+            <div style={{ marginTop: 16, fontSize: 14.5, color: C.mute, lineHeight: 1.65 }}>
+              Coming soon: autocalls and phoenix notes, reverse convertibles, bonus and discount
+              certificates, priced on the same engine and design language as the FX suite.
+            </div>
+            <button onClick={() => nav("fx")} className="sp-btn"
+              style={{ marginTop: 30, padding: "13px 34px", border: "none", borderRadius: 12,
+                cursor: "pointer", background: "linear-gradient(135deg, #14A87D 0%, #3EDDA8 140%)",
+                color: "#fff", fontFamily: sans, fontSize: 14.5, fontWeight: 700,
+                boxShadow: "0 8px 26px rgba(20,168,125,0.35)" }}>
               Go to FX Structured Products →
             </button>
           </div>
@@ -1991,7 +2081,7 @@ export default function StructuredPricer() {
           <SiteHeader active="fx" onNav={nav} />
           <div style={{ fontSize: 24, fontWeight: 800, letterSpacing: "-0.02em", marginBottom: 6 }}>
             FX Structured{" "}
-            <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #6E8EF7)",
+            <span style={{ backgroundImage: "linear-gradient(90deg, #14A87D, #3EDDA8)",
               WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Products</span>
           </div>
           <div style={{ fontSize: 13.5, color: C.mute, marginBottom: 26 }}>
@@ -2025,7 +2115,7 @@ export default function StructuredPricer() {
                 style={{ ...card, cursor: "pointer" }}>
                 <div style={{ fontSize: 16, fontWeight: 700 }}>{pr.name}</div>
                 <div style={{ fontSize: 12, color: C.mute, marginTop: 8, lineHeight: 1.5 }}>{pr.desc}</div>
-                <div style={{ marginTop: 16, fontSize: 12.5, fontWeight: 700, color: C.blue }}>
+                <div style={{ marginTop: 16, fontSize: 12.5, fontWeight: 700, color: C.jade }}>
                   Open ticket →
                 </div>
               </div>
@@ -2145,14 +2235,14 @@ export default function StructuredPricer() {
                     <span onClick={() => setShowCivHelp(v => !v)}
                       style={{ display: "inline-flex", alignItems: "center", justifyContent: "center",
                         width: 15, height: 15, borderRadius: 8, marginLeft: 4, cursor: "pointer",
-                        border: `1px solid ${showCivHelp ? C.blue : C.faint}`,
-                        color: showCivHelp ? C.blue : C.faint, fontSize: 10, fontWeight: 700,
+                        border: `1px solid ${showCivHelp ? C.jade : C.faint}`,
+                        color: showCivHelp ? C.jade : C.faint, fontSize: 10, fontWeight: 700,
                         verticalAlign: "middle" }}>?</span></span>}
                   caption={`= ${fmt((+civ || 0) * 100, 0)} figures of accumulated gain`}>
                   <Num v={civ} set={setCiv} step="0.05" min="0" />
                   {showCivHelp && (
-                    <div style={{ marginTop: 8, padding: "10px 12px", background: "rgba(74,125,240,0.07)",
-                      border: `1px solid rgba(74,125,240,0.35)`, borderRadius: 10,
+                    <div style={{ marginTop: 8, padding: "10px 12px", background: "rgba(20,168,125,0.07)",
+                      border: `1px solid rgba(20,168,125,0.35)`, borderRadius: 10,
                       fontSize: 11.5, color: C.mute, lineHeight: 1.55 }}>
                       1 CIV = 100 figures and 1 figure = 100 pips ({(PC.pip * 100).toFixed(PC.dec)} in {pair}
                       rate terms). The trade knocks out once the sum of in the money fixings reaches
@@ -2297,6 +2387,24 @@ export default function StructuredPricer() {
                 <Row name="Strike"><RateNum v={vanStrike} set={setVanStrike} /></Row>
               )}
               {product === "SHARK" && (<>
+                <Row name="Payout Currency"
+                  caption={sharkPayCcy === QUOTE
+                    ? `natural settlement: the payoff ${sharkDir === "Bullish" ? "(S − K)" : "(K − S)"} is a ${QUOTE} amount`
+                    : `self quanto: the ${QUOTE} payoff is settled in ${BASE}, changing PV and participation`}>
+                  <Sel v={sharkPayCcy === BASE ? BASE : QUOTE}
+                    set={v => setSharkPayCcy(v)} opts={[QUOTE, BASE]} />
+                </Row>
+                {sharkPayCcy === BASE && (
+                  <Row name="Quanto Conversion"
+                    caption={sharkQConv === "Strike K"
+                      ? "payoff divided by K, settled in " + BASE + ": the standard self quanto"
+                      : sharkQConv === "Spot at T0"
+                      ? "payoff divided by today's spot, fixed at inception"
+                      : "converted at the expiry fixing: economically identical to the " + QUOTE + " payout, no quanto adjustment"}>
+                    <Sel v={sharkQConv} set={setSharkQConv}
+                      opts={["Strike K", "Spot at T0", "Spot at expiry"]} />
+                  </Row>
+                )}
                 <Row name="Strike" caption="participation starts here">
                   <RateNum v={sharkStrike} set={setSharkStrike} /></Row>
                 <Row name="KO Barrier"
@@ -2358,7 +2466,7 @@ export default function StructuredPricer() {
               <div style={card}>
                 <PanelTitle right={
                   <button onClick={() => { fetchSpot(false); fetchCurves(); }} className="sp-btn"
-                    style={{ background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)", border: "none",
+                    style={{ background: "linear-gradient(135deg, #14A87D 0%, #3EDDA8 140%)", border: "none",
                       color: "#fff", borderRadius: 8, padding: "5px 14px", fontSize: 11.5, fontWeight: 700,
                       cursor: "pointer", fontFamily: sans }}>Reload All</button>
                 }>Market</PanelTitle>
@@ -2414,7 +2522,7 @@ export default function StructuredPricer() {
                     <Sel v={payTiming} set={setPayTiming} opts={["Rolling", "At maturity (ZC)"]} /></Row>
                   <Row name="Maturity">
                     <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                      color: C.blue, fontWeight: 600 }}>{fmtDate(maturity)}</div>
+                      color: C.jade, fontWeight: 600 }}>{fmtDate(maturity)}</div>
                   </Row>
                 </>)}
                 {(product === "DCD" || product === "SHARK") && (<>
@@ -2424,7 +2532,7 @@ export default function StructuredPricer() {
                     <Sel v={dcdDayCount} set={setDcdDayCount} opts={["ACT/365", "ACT/360", "30/360", "ACT/ACT"]} /></Row>
                   <Row name="Maturity">
                     <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                      color: C.blue, fontWeight: 600 }}>{fmtDate(dcdMatDate(startDate, dcdTerm))}</div>
+                      color: C.jade, fontWeight: 600 }}>{fmtDate(dcdMatDate(startDate, dcdTerm))}</div>
                   </Row>
                 </>)}
                 {product === "VAN" && (<>
@@ -2432,7 +2540,7 @@ export default function StructuredPricer() {
                     <Sel v={vanTerm} set={setVanTerm} opts={["1W", "2W", "1M", "2M", "3M", "6M", "12M"]} /></Row>
                   <Row name="Expiry Date">
                     <div style={{ ...input, background: "transparent", border: `1px dashed ${C.inpLine}`,
-                      color: C.blue, fontWeight: 600 }}>{fmtDate(dcdMatDate(startDate, vanTerm))}</div>
+                      color: C.jade, fontWeight: 600 }}>{fmtDate(dcdMatDate(startDate, vanTerm))}</div>
                   </Row>
                 </>)}
               </div>
@@ -2442,11 +2550,11 @@ export default function StructuredPricer() {
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, marginTop: 26 }}>
             <button onClick={runPricing} disabled={busy} className="sp-btn"
               style={{ padding: "16px 72px",
-                background: busy ? C.card2 : "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)",
+                background: busy ? C.card2 : "linear-gradient(135deg, #14A87D 0%, #3EDDA8 140%)",
                 color: busy ? C.mute : "#fff", letterSpacing: "0.01em",
                 fontFamily: sans, fontSize: 17, fontWeight: 700, border: "none", borderRadius: 14,
                 cursor: busy ? "wait" : "pointer",
-                boxShadow: busy ? "none" : "0 10px 34px rgba(74,125,240,0.40)" }}>
+                boxShadow: busy ? "none" : "0 10px 34px rgba(20,168,125,0.40)" }}>
               {busy ? "Pricing…" : "Price Product →"}
             </button>
             {err && <div style={{ color: C.red, fontSize: 13 }}>{err}</div>}
@@ -2458,31 +2566,25 @@ export default function StructuredPricer() {
 
   /* ————————————————— PAGE 2 : RESULTS ————————————————— */
   const greekCards = res ? [
+    { id: "delta", name: "Delta", unit: res.base + " equivalent", color: C.jade, val: fmtBigSigned(res.delta) },
     res.kind === "VAN"
-      ? { id: "delta", name: "Delta", unit: fmtBigSigned(res.delta) + " " + res.base + " equivalent",
-          color: C.blue, val: fmtSigned(res.delta / res.eurN, 4) }
-      : { id: "delta", name: "Delta", unit: res.base + " equivalent", color: C.blue, val: fmtBigSigned(res.delta) },
-    { id: "delta", name: "Delta %", unit: "of " + res.base + " notional", color: C.text, val: fmtSigned(res.deltaPct, 1) + "%" },
-    res.kind === "VAN"
-      ? { id: "gamma", name: "Gamma", unit: fmtBigSigned(res.gammaPip) + " " + res.base + " cash per pip",
-          color: C.text, val: fmtSigned(res.gammaPip / res.eurN, 5) }
-      : { id: "gamma", name: "Gamma", unit: "Δdelta per 1 pip", color: C.text, val: fmtBigSigned(res.gammaPip) },
-    { id: "vega", name: "Vega", unit: res.base + " per 1 vol pt", color: C.blue, val: fmtBigSigned(res.vega / res.S0) },
+      ? { id: "deltaU", name: "Delta", unit: "unitless, (1.00) to 1.00", color: C.text,
+          val: fmtSigned(res.delta / res.eurN, 4) }
+      : { id: "delta", name: "Delta %", unit: "of " + res.base + " notional", color: C.text, val: fmtSigned(res.deltaPct, 1) + "%" },
+    { id: "gamma", name: "Gamma", unit: "Δdelta per 1 pip", color: C.text, val: fmtBigSigned(res.gammaPip) },
+    { id: "vega", name: "Vega", unit: res.base + " per 1 vol pt", color: C.jade, val: fmtBigSigned(res.vega / res.S0) },
     { id: "theta", name: "Theta", unit: res.base + " per day", color: C.text, val: fmtBigSigned(res.theta / res.S0) },
     { id: "rho", name: "Rho " + res.quote + " / " + res.base, unit: res.base + " per 1 bp", color: C.text,
       val: `${fmtBigSigned(res.rhoUSD / res.S0)} / ${fmtBigSigned(res.rhoEUR / res.S0)}` },
   ] : [];
   const greekMeta = {
-    delta: { title: "Delta vs spot",
-      unit: res && res.kind === "VAN" ? "unitless, from (1.00) to 1.00" : res.base + " equivalent",
-      keys: [["v", C.blue, "Delta"]] },
-    gamma: { title: "Gamma vs spot",
-      unit: res && res.kind === "VAN" ? "Δdelta per 1 pip, per unit of notional" : "Δdelta per 1 pip",
-      keys: [["v", C.amber, "Gamma"]] },
-    vega:  { title: "Vega vs spot", unit: res.base + " per 1 vol pt", keys: [["v", C.blue, "Vega"]] },
+    delta: { title: "Delta vs spot", unit: res ? res.base + " equivalent" : "", keys: [["v", C.jade, "Delta"]] },
+    deltaU: { title: "Delta vs spot", unit: "unitless, from (1.00) to 1.00", keys: [["v", C.jade, "Delta"]] },
+    gamma: { title: "Gamma vs spot", unit: "Δdelta per 1 pip", keys: [["v", C.amber, "Gamma"]] },
+    vega:  { title: "Vega vs spot", unit: res.base + " per 1 vol pt", keys: [["v", C.jade, "Vega"]] },
     theta: { title: "Theta vs spot", unit: res.base + " per day", keys: [["v", C.amber, "Theta"]] },
     rho:   { title: "Rho vs spot", unit: res.base + " per 1 bp",
-             keys: [["vUSD", C.blue, "Rho USD"], ["vEUR", C.red, "Rho EUR"]] },
+             keys: [["vUSD", C.jade, "Rho USD"], ["vEUR", C.red, "Rho EUR"]] },
   };
   const tickFmt = v => fmtBig(v);
 
@@ -2502,14 +2604,14 @@ export default function StructuredPricer() {
               : product === "ACCU" ? "Accumulator"
               : product === "VAN" ? "Vanilla Option"
               : product === "SHARK" ? "Sharkfin Note" : tarfName)}{" "}
-            <span style={{ backgroundImage: "linear-gradient(90deg, #4A7DF0, #8B7EDB)",
+            <span style={{ backgroundImage: "linear-gradient(90deg, #14A87D, #3EDDA8)",
               WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent" }}>Pricing</span>
           </div>
           <button onClick={runPricing} disabled={busy} className="sp-btn"
             style={{ marginLeft: "auto",
-              background: "linear-gradient(135deg, #4A7DF0 0%, #6E8EF7 140%)", border: "none", color: "#fff",
+              background: "linear-gradient(135deg, #14A87D 0%, #3EDDA8 140%)", border: "none", color: "#fff",
               borderRadius: 10, padding: "9px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
-              boxShadow: "0 6px 20px rgba(74,125,240,0.30)" }}>
+              boxShadow: "0 6px 20px rgba(20,168,125,0.30)" }}>
             {busy ? "Pricing…" : "Reprice"}
           </button>
         </div>
@@ -2523,7 +2625,8 @@ export default function StructuredPricer() {
                 {fmt(res.partPct, 1)}<span style={{ fontSize: 16, color: C.mute }}>%</span>
               </div>
               <div style={{ fontSize: 11, color: res.shortBudget ? C.amber : C.faint, marginTop: 4 }}>
-                {res.shortBudget ? "interest budget short of the rebate cost" : "of " + res.base + " performance beyond the strike"}
+                {res.shortBudget ? "interest budget short of the rebate cost"
+                  : "of " + res.base + " performance beyond the strike, paid in " + res.payCcy}
               </div>
             </div>
             <div style={{ padding: "20px 22px", borderLeft: `1px solid ${C.line}` }}>
@@ -2555,7 +2658,11 @@ export default function StructuredPricer() {
                 ["Strike / Barrier", fmtRate(res.K) + " / " + fmtRate(res.H) + " · " + res.obs + " KO"],
                 ["Capital floor", "100% guaranteed" + (res.rebPct > 0 ? " + " + fmt(res.rebPct, 2) + "% rebate if KO" : "")],
                 ["Direction", res.om === 1 ? "Bullish " + res.base + " · call up & out" : "Bearish " + res.base + " · put down & out"],
-                ["Pricing", "Monte Carlo · " + fmt(res.nPathsUsed, 0) + " paths" + (res.obs === "American" ? " · bridge KO monitoring" : " · maturity fixing") + " · " + res.depCcy + " coupon exact"],
+                ["Payout", res.payCcy + (res.payCcy !== res.quote
+                  ? " · " + (res.qConv === "Spot at expiry" ? "converted at the expiry fixing, no quanto adjustment"
+                    : res.qConv === "Spot at T0" ? "self quanto, converted at inception spot"
+                    : "self quanto, converted at the strike") : " · natural settlement")],
+                ["Pricing", "Monte Carlo · " + fmt(res.nPathsUsed, 0) + " paths" + (res.obs === "American" ? " · bridge KO monitoring" : " · maturity fixing") + (res.selfQuanto ? " · S_T weighted expectation" : "")],
               ].map(([k, v]) => (
                 <div key={k} style={{ background: C.card2, border: `1px solid ${C.line}`,
                   borderRadius: 10, padding: "11px 14px" }}>
@@ -2763,12 +2870,12 @@ export default function StructuredPricer() {
               const active = selGreek === g.id;
               return (
                 <div key={i} onClick={() => setSelGreek(active ? null : g.id)} className="sp-click"
-                  style={{ background: active ? "rgba(74,125,240,0.10)" : C.card,
-                    border: `1.5px solid ${active ? C.blue : C.line}`, borderRadius: 12,
+                  style={{ background: active ? "rgba(20,168,125,0.10)" : C.card,
+                    border: `1.5px solid ${active ? C.jade : C.line}`, borderRadius: 12,
                     padding: "13px 14px", cursor: "pointer", userSelect: "none" }}>
                   <div style={{ ...colHead, display: "flex", justifyContent: "space-between" }}>
                     <span>{g.name}</span>
-                    <span style={{ color: active ? C.blue : C.faint }}>{active ? "▲" : "▾"}</span>
+                    <span style={{ color: active ? C.jade : C.faint }}>{active ? "▲" : "▾"}</span>
                   </div>
                   <div style={{ fontFamily: mono, fontSize: 16.5, color: g.color, marginTop: 7,
                     fontVariantNumeric: "tabular-nums" }}>{g.val}</div>
@@ -2783,7 +2890,7 @@ export default function StructuredPricer() {
             </div>
           )}
           {selGreek && res && (
-            <div style={{ ...card, borderTop: `2px solid ${C.blue}`, marginTop: 12 }}>
+            <div style={{ ...card, borderTop: `2px solid ${C.jade}`, marginTop: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>
                   {greekMeta[selGreek].title}
@@ -2806,8 +2913,8 @@ export default function StructuredPricer() {
                       labelFormatter={v => "Spot " + (+v).toFixed(RATE_DEC)}
                       formatter={(v, nm) => [fmt(v, 0), nm]} />
                     <ReferenceLine y={0} stroke={C.mute} strokeWidth={1} />
-                    <ReferenceLine ifOverflow="extendDomain" x={res.S0} stroke={C.blue} strokeDasharray="4 3"
-                      label={{ value: "Spot " + res.S0.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top" }} />
+                    <ReferenceLine ifOverflow="extendDomain" x={res.S0} stroke={C.jade} strokeDasharray="4 3"
+                      label={{ value: "Spot " + res.S0.toFixed(RATE_DEC), fill: C.jade, fontSize: 10, fontFamily: mono, position: "top" }} />
                     {!res.pivotOn && (
                       <ReferenceLine ifOverflow="extendDomain" x={res.K} stroke={C.amber} strokeDasharray="4 3"
                         label={{ value: "K " + res.K.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
@@ -2815,8 +2922,8 @@ export default function StructuredPricer() {
                     {res.pivotOn && (<>
                       <ReferenceLine ifOverflow="extendDomain" x={res.kLow} stroke={C.amber} strokeDasharray="4 3"
                         label={{ value: "KL " + res.kLow.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
-                      <ReferenceLine ifOverflow="extendDomain" x={res.pivotL} stroke={C.blue} strokeDasharray="4 3"
-                        label={{ value: "P " + res.pivotL.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
+                      <ReferenceLine ifOverflow="extendDomain" x={res.pivotL} stroke={C.jade} strokeDasharray="4 3"
+                        label={{ value: "P " + res.pivotL.toFixed(RATE_DEC), fill: C.jade, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                       <ReferenceLine ifOverflow="extendDomain" x={res.kHigh} stroke={C.amber} strokeDasharray="4 3"
                         label={{ value: "KH " + res.kHigh.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                     </>)}
@@ -2845,6 +2952,44 @@ export default function StructuredPricer() {
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
+              {selGreek === "vega" && res && res.kind === "SHARK" && res.prof.vegaVol && (
+                <div style={{ marginTop: 18 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                    <div style={{ fontWeight: 700, fontSize: 14.5 }}>
+                      Vega vs volatility
+                      <span style={{ color: C.faint, fontWeight: 400, fontSize: 12.5 }}>
+                        {" "}· {res.base} per 1 vol pt, spot held at {fmtRate(res.S0)}</span>
+                    </div>
+                  </div>
+                  <div style={{ height: 240 }}>
+                    <ResponsiveContainer>
+                      <ComposedChart data={res.prof.vegaVol} margin={{ top: 20, right: 16, bottom: 4, left: 8 }}>
+                        <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false} />
+                        <XAxis dataKey="sg" type="number" domain={["dataMin", "dataMax"]}
+                          tick={{ fill: C.mute, fontSize: 10, fontFamily: mono }}
+                          tickFormatter={v => fmt(v, 0) + "%"} stroke={C.line} />
+                        <YAxis tick={{ fill: C.mute, fontSize: 10, fontFamily: mono }}
+                          tickFormatter={tickFmt} stroke={C.line} width={56} />
+                        <Tooltip contentStyle={{ background: C.card2, border: `1px solid ${C.line}`,
+                            fontFamily: mono, fontSize: 12, borderRadius: 8 }}
+                          labelFormatter={v => "σ " + fmt(+v, 2) + "%"}
+                          formatter={(v, nm) => [fmt(v, 0), nm]} />
+                        <ReferenceLine y={0} stroke={C.mute} strokeWidth={1} />
+                        <ReferenceLine ifOverflow="extendDomain" x={res.sigUsed} stroke={C.jade} strokeDasharray="4 3"
+                          label={{ value: "σ " + fmt(res.sigUsed, 2) + "%", fill: C.jade, fontSize: 10, fontFamily: mono, position: "top" }} />
+                        <Line type="monotone" dataKey="v" name="Vega" stroke={C.violet} strokeWidth={2.4} dot={false} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: C.faint, marginTop: 8, lineHeight: 1.55 }}>
+                    Two competing forces: volatility raises the option value but also the knock out probability.
+                    At low vol the barrier is far away in probability space and vega is positive; as vol rises
+                    P(KO) grows faster than the upside, vega peaks, declines through zero, and at high vol the
+                    barrier dominates completely. Where the marked σ sits on this curve decides the sign of the
+                    vega you see at spot in the chart above.
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -2939,8 +3084,8 @@ export default function StructuredPricer() {
                     labelFormatter={v => "Spot " + (+v).toFixed(RATE_DEC)}
                     formatter={v => [fmt(v, 0) + " EUR", "PV"]} />
                   <ReferenceLine y={0} stroke={C.mute} strokeWidth={1} />
-                  <ReferenceLine ifOverflow="extendDomain" x={res.S0} stroke={C.blue} strokeDasharray="4 3"
-                    label={{ value: "Spot " + res.S0.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top" }} />
+                  <ReferenceLine ifOverflow="extendDomain" x={res.S0} stroke={C.jade} strokeDasharray="4 3"
+                    label={{ value: "Spot " + res.S0.toFixed(RATE_DEC), fill: C.jade, fontSize: 10, fontFamily: mono, position: "top" }} />
                   {!res.pivotOn && (
                     <ReferenceLine ifOverflow="extendDomain" x={res.K} stroke={C.amber} strokeDasharray="4 3"
                       label={{ value: "K " + res.K.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
@@ -2948,8 +3093,8 @@ export default function StructuredPricer() {
                   {res.pivotOn && (<>
                     <ReferenceLine ifOverflow="extendDomain" x={res.kLow} stroke={C.amber} strokeDasharray="4 3"
                       label={{ value: "KL " + res.kLow.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
-                    <ReferenceLine ifOverflow="extendDomain" x={res.pivotL} stroke={C.blue} strokeDasharray="4 3"
-                      label={{ value: "P " + res.pivotL.toFixed(RATE_DEC), fill: C.blue, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
+                    <ReferenceLine ifOverflow="extendDomain" x={res.pivotL} stroke={C.jade} strokeDasharray="4 3"
+                      label={{ value: "P " + res.pivotL.toFixed(RATE_DEC), fill: C.jade, fontSize: 10, fontFamily: mono, position: "top", dy: 30 }} />
                     <ReferenceLine ifOverflow="extendDomain" x={res.kHigh} stroke={C.amber} strokeDasharray="4 3"
                       label={{ value: "KH " + res.kHigh.toFixed(RATE_DEC), fill: C.amber, fontSize: 10, fontFamily: mono, position: "top", dy: 15 }} />
                   </>)}
